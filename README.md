@@ -2,15 +2,6 @@
 
 A Python implementation of the **Density Matrix Renormalization Group (DMRG)** algorithm for 1D quantum many-body systems, built on top of [Cytnx](https://github.com/Cytnx-dev/Cytnx) UniTensor as the tensor backend.
 
-## Features
-
-- **Matrix Product States (MPS)** — open-boundary, labeled-index site tensors with gauge/canonical form management
-- **Matrix Product Operators (MPO)** — open-boundary operators following the upper-triangular MPO convention
-- **Two-site DMRG sweep** — ground-state and excited-state optimization with SVD-based bond compression
-- **Lanczos eigensolver** — type-agnostic Krylov-subspace solver for local eigenvalue problems
-- **Environment caching** — lazy left/right environment tensor cache with automatic stale-window invalidation
-- **Heisenberg XXZ Hamiltonian** — built-in spin-1/2 chain MPO builder
-
 ## Quick Start
 
 ```python
