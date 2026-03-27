@@ -36,7 +36,7 @@ for max_dim, cutoff in schedule:
 print(f"E/N = {E/N:.6f}")
 ```
 
-See [examples/example_dmrg.py](examples/example_dmrg.py) for a complete runnable script.
+See [examples/](examples/) for more runnable scripts.
 
 ## Installation
 
