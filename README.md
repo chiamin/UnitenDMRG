@@ -1,4 +1,4 @@
-# Uni10DMRG — DMRG with Cytnx UniTensor
+# UnitenDMRG — DMRG with Cytnx UniTensor
 
 A Python implementation of the **Density Matrix Renormalization Group (DMRG)** algorithm for 1D quantum many-body systems, built on top of [Cytnx](https://github.com/Cytnx-dev/Cytnx) UniTensor as the tensor backend.
 
