@@ -12,11 +12,10 @@ Coverage
    - linearity: inner(alpha*phi) = alpha * inner(phi)
 
 3. EffOperator construction  (TestEffOperatorConstruction)
-   - num_sites property
-   - make_phi 1-site: labels ["l","i0","r"]
-   - make_phi 2-site: labels ["l","i0","i1","r"]
-   - make_phi wrong count → AssertionError
-   - make_phi 0-site → ValueError
+   - accepts 0/1/2 MPO tensors
+   - MPS.make_phi 1-site: labels ["l","i0","r"]
+   - MPS.make_phi 2-site: labels ["l","i0","i1","r"]
+   - MPS.make_phi out-of-range checks
 
 4. EffOperator.apply  (TestEffOperatorApply)
    - identity MPO (dim-1 boundaries): apply(phi) == phi,  1-site and 2-site
@@ -29,13 +28,13 @@ Coverage
    - Rank-1 contribution formula: apply_with - apply_without = w * inner * |Φ_0⟩
    - Two add_term calls: both rank-1 terms applied and summed correctly
 
-6. EffOperator.split_phi  (TestEffOperatorSplitPhi)
+6. MPS.update_sites  (TestEffOperatorSplitPhi)
    - 1-site: returns single tensor, labels ["l","i","r"]
-   - 2-site absorb="right": left tensor is an isometry
-   - 2-site absorb="left":  right tensor is an isometry
-   - split then make_phi reconstructs original phi (no truncation)
-   - split with max_dim < chi: bond dimension is actually truncated
-   - 0-site: NotImplementedError
+   - 2-site absorb="right": left tensor is isometric
+   - 2-site absorb="left":  right tensor is isometric
+   - update then make_phi reconstructs original phi (no truncation)
+   - update with max_dim < chi: bond dimension is actually truncated
+   - 0-site phi update: NotImplementedError
 
 7. Integration with OperatorEnv / VectorEnv  (TestEffOperatorIntegration)
    - Identity MPO: <ψ|H_eff(p,p+1)|ψ> / <φ|φ> = 1 for normalized product-state MPS
@@ -51,7 +50,7 @@ from pathlib import Path
 import numpy as np
 
 THIS_DIR = Path(__file__).resolve().parent
-PKG_ROOT = THIS_DIR.parent.parent
+PKG_ROOT = THIS_DIR.parent.parent.parent
 if str(PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(PKG_ROOT))
 
@@ -64,8 +63,8 @@ if cytnx is not None:
     from MPS.mps import MPS
     from MPS.mpo import MPO
     from MPS.mps_init import random_mps
-    from MPS.dmrg.environment import OperatorEnv, VectorEnv
-    from MPS.dmrg.effective_operators import EffVector, EffOperator
+    from DMRG.environment import OperatorEnv, VectorEnv
+    from DMRG.effective_operators import EffVector, EffOperator
     from MPS.linalg import inner as linalg_inner
 
 
@@ -105,6 +104,13 @@ def _make_identity_mpo(N: int, d: int) -> "MPO":
 
 def _make_random_mps(N: int, d: int = 2, D: int = 3, seed: int = 0) -> "MPS":
     return random_mps(N, d, D, seed=seed, normalize=True)
+
+
+def _make_phi_from_sites(*mps_tensors: "cytnx.UniTensor") -> "cytnx.UniTensor":
+    """Build phi with the current API: MPS.make_phi(p, n)."""
+    if len(mps_tensors) == 0:
+        raise ValueError("Need at least one MPS tensor to build phi.")
+    return MPS(list(mps_tensors)).make_phi(0, len(mps_tensors))
 
 
 def _trivial_op_env_LR(d: int, Dmid: int = 1):
@@ -158,7 +164,7 @@ class TestEffVectorConstruction(unittest.TestCase):
     def test_2site_labels(self):
         """EffVector with 2 MPS tensors has labels ['l','i0','i1','r']."""
         vec_env = VectorEnv(self.mps, self.mps, init_center=1)
-        vec_env.update_LR(1, 2)   # stale window = [1,2]
+        vec_env.update_envs(1, 2)   # stale window = [1,2]
         L = vec_env[0]
         R = vec_env[3]
         ev = EffVector(L, R, self.mps[1], self.mps[2])
@@ -232,55 +238,47 @@ class TestEffOperatorConstruction(unittest.TestCase):
         L, R = self._LR()
         M = _make_mpo_site(1, 2, 1)
         eff = EffOperator(L, R, M)
-        self.assertEqual(eff.num_sites, 1)
+        self.assertEqual(len(eff._mpo_tensors), 1)
 
     def test_num_sites_2(self):
         L, R = self._LR()
         M0 = _make_mpo_site(1, 2, 1)
         M1 = _make_mpo_site(1, 2, 1)
         eff = EffOperator(L, R, M0, M1)
-        self.assertEqual(eff.num_sites, 2)
+        self.assertEqual(len(eff._mpo_tensors), 2)
 
     def test_num_sites_0(self):
         L, R = self._LR()
         eff = EffOperator(L, R)
-        self.assertEqual(eff.num_sites, 0)
+        self.assertEqual(len(eff._mpo_tensors), 0)
 
     def test_make_phi_1site_labels(self):
-        """make_phi with 1 MPS tensor → labels ['l','i0','r']."""
-        L, R = self._LR()
-        M = _make_mpo_site(1, 2, 1)
-        eff = EffOperator(L, R, M)
+        """MPS.make_phi with 1 site → labels ['l','i0','r']."""
         A = _make_mps_site(1, 2, 1)
-        phi = eff.make_phi(A)
+        phi = _make_phi_from_sites(A)
         self.assertEqual(set(_phi_labels(phi)), {"l", "i0", "r"})
 
     def test_make_phi_2site_labels(self):
-        """make_phi with 2 MPS tensors → labels ['l','i0','i1','r']."""
-        L, R = self._LR()
-        M0, M1 = _make_mpo_site(1, 2, 1), _make_mpo_site(1, 2, 1)
-        eff = EffOperator(L, R, M0, M1)
+        """MPS.make_phi with 2 sites → labels ['l','i0','i1','r']."""
         A0 = _make_mps_site(1, 2, 2)
         A1 = _make_mps_site(2, 2, 1)
-        phi = eff.make_phi(A0, A1)
+        phi = _make_phi_from_sites(A0, A1)
         self.assertEqual(set(_phi_labels(phi)), {"l", "i0", "i1", "r"})
 
     def test_make_phi_wrong_count(self):
-        """make_phi with wrong number of tensors → AssertionError."""
-        L, R = self._LR()
-        M = _make_mpo_site(1, 2, 1)
-        eff = EffOperator(L, R, M)
+        """MPS.make_phi with out-of-range window raises IndexError."""
         A0 = _make_mps_site(1, 2, 2)
         A1 = _make_mps_site(2, 2, 1)
-        with self.assertRaises(AssertionError):
-            eff.make_phi(A0, A1)   # 2 tensors but eff has 1 MPO tensor
+        mps = MPS([A0, A1])
+        with self.assertRaises(IndexError):
+            mps.make_phi(1, 2)
 
     def test_make_phi_0site_raises(self):
-        """make_phi on 0-site EffOperator → ValueError."""
-        L, R = self._LR()
-        eff = EffOperator(L, R)
+        """MPS.make_phi with n=0 raises ValueError."""
+        A = _make_mps_site(1, 2, 1)
+        mps = MPS([A])
         with self.assertRaises(ValueError):
-            eff.make_phi()
+            mps.make_phi(0, 0)
 
 
 # ===========================================================================
@@ -301,7 +299,7 @@ class TestEffOperatorApply(unittest.TestCase):
         rng = np.random.default_rng(10)
         arr = rng.standard_normal((1, d, 1)).astype(complex)
         A = _make_mps_site(1, d, 1, arr=arr)
-        phi = eff.make_phi(A)
+        phi = _make_phi_from_sites(A)
 
         result = eff.apply(phi)
 
@@ -322,7 +320,7 @@ class TestEffOperatorApply(unittest.TestCase):
         arr1 = rng.standard_normal((1, d, 1)).astype(complex)
         A0 = _make_mps_site(1, d, 1, arr=arr0)
         A1 = _make_mps_site(1, d, 1, arr=arr1)
-        phi = eff.make_phi(A0, A1)
+        phi = _make_phi_from_sites(A0, A1)
 
         result = eff.apply(phi)
 
@@ -349,7 +347,7 @@ class TestEffOperatorApply(unittest.TestCase):
         rng = np.random.default_rng(12)
         A = _make_mps_site(1, d, 1,
                            arr=rng.standard_normal((1, d, 1)).astype(complex))
-        phi = eff.make_phi(A)
+        phi = _make_phi_from_sites(A)
 
         result = eff.apply(phi)
 
@@ -376,7 +374,7 @@ class TestEffOperatorApply(unittest.TestCase):
                              arr=rng.standard_normal((1, d, 1)).astype(complex))
         A1 = _make_mps_site(1, d, 1,
                              arr=rng.standard_normal((1, d, 1)).astype(complex))
-        phi = eff.make_phi(A0, A1)
+        phi = _make_phi_from_sites(A0, A1)
 
         result = eff.apply(phi)
 
@@ -391,7 +389,7 @@ class TestEffOperatorApply(unittest.TestCase):
         M = _make_mpo_site(1, d, 1)
         eff = EffOperator(L, R, M)
         A = _make_mps_site(1, d, 1)
-        phi = eff.make_phi(A)
+        phi = _make_phi_from_sites(A)
         result = eff.apply(phi)
         self.assertEqual(set(_phi_labels(result)), set(_phi_labels(phi)))
 
@@ -410,7 +408,7 @@ class TestEffOperatorAddTerm(unittest.TestCase):
         mpo     = _make_identity_mpo(4, d)
 
         op_env = OperatorEnv(mps_phi, mps_phi, mpo, init_center=1)
-        op_env.update_LR(1, 1)   # stale=[1,1]
+        op_env.update_envs(1, 1)   # stale=[1,1]
         L = op_env[0]
         R = op_env[2]
         M = mpo[1]
@@ -421,7 +419,7 @@ class TestEffOperatorAddTerm(unittest.TestCase):
         R_v = vec_env[2]
         ev = EffVector(L_v, R_v, mps_ref[1])
 
-        phi = eff.make_phi(mps_phi[1])
+        phi = mps_phi.make_phi(1, 1)
         return eff, ev, phi
 
     def test_weight_zero_unchanged(self):
@@ -472,7 +470,7 @@ class TestEffOperatorAddTerm(unittest.TestCase):
         mpo      = _make_identity_mpo(4, d)
 
         op_env = OperatorEnv(mps_phi, mps_phi, mpo, init_center=1)
-        op_env.update_LR(1, 1)
+        op_env.update_envs(1, 1)
         L, R, M = op_env[0], op_env[2], mpo[1]
 
         eff_plain = EffOperator(L, R, M)
@@ -487,7 +485,7 @@ class TestEffOperatorAddTerm(unittest.TestCase):
         eff_with.add_term(ev1, w1)
         eff_with.add_term(ev2, w2)
 
-        phi = eff_plain.make_phi(mps_phi[1])
+        phi = mps_phi.make_phi(1, 1)
         H_phi      = eff_plain.apply(phi).get_block().numpy().ravel()
         H_plus_phi = eff_with.apply(phi).get_block().numpy().ravel()
 
@@ -514,8 +512,10 @@ class TestEffOperatorSplitPhi(unittest.TestCase):
         M = _make_mpo_site(1, d, 1)
         eff = EffOperator(L, R, M)
         A = _make_mps_site(1, d, 1)
-        phi = eff.make_phi(A)
-        (A_out,) = eff.split_phi(phi, max_dim=10, cutoff=0.0, absorb="right")
+        mps = MPS([A, _make_mps_site(1, d, 1)])
+        phi = mps.make_phi(0, 1)
+        mps.update_sites(0, phi, max_dim=10, cutoff=0.0, absorb="right")
+        A_out = mps[0]
         self.assertEqual(set(_phi_labels(A_out)), {"l", "i", "r"})
 
     def test_2site_split_right_left_isometry(self):
@@ -532,9 +532,10 @@ class TestEffOperatorSplitPhi(unittest.TestCase):
         arr1 = rng.standard_normal((chi, d, 1)).astype(complex)
         A0 = _make_mps_site(1, d, chi, arr=arr0)
         A1 = _make_mps_site(chi, d, 1, arr=arr1)
-        phi = eff.make_phi(A0, A1)
-
-        A_left, A_right = eff.split_phi(phi, max_dim=chi, cutoff=0.0, absorb="right")
+        mps = MPS([A0, A1])
+        phi = mps.make_phi(0, 2)
+        mps.update_sites(0, phi, max_dim=chi, cutoff=0.0, absorb="right")
+        A_left, A_right = mps[0], mps[1]
 
         # Left tensor is isometry: A† A ≈ I  (contract l,i bonds)
         A_left_dag = A_left.Dagger()
@@ -560,9 +561,10 @@ class TestEffOperatorSplitPhi(unittest.TestCase):
         arr1 = rng.standard_normal((chi, d, 1)).astype(complex)
         A0 = _make_mps_site(1, d, chi, arr=arr0)
         A1 = _make_mps_site(chi, d, 1, arr=arr1)
-        phi = eff.make_phi(A0, A1)
-
-        A_left, A_right = eff.split_phi(phi, max_dim=chi, cutoff=0.0, absorb="left")
+        mps = MPS([A0, A1])
+        phi = mps.make_phi(0, 2)
+        mps.update_sites(0, phi, max_dim=chi, cutoff=0.0, absorb="left")
+        A_left, A_right = mps[0], mps[1]
 
         # Right tensor is isometry: B B† ≈ I
         Bf = A_right.relabels(["l", "i", "r"], ["s", "_i", "_r"])
@@ -586,12 +588,13 @@ class TestEffOperatorSplitPhi(unittest.TestCase):
         arr1 = rng.standard_normal((chi, d, 1)).astype(complex)
         A0 = _make_mps_site(1, d, chi, arr=arr0)
         A1 = _make_mps_site(chi, d, 1, arr=arr1)
-        phi = eff.make_phi(A0, A1)
-
-        A_left, A_right = eff.split_phi(phi, max_dim=chi, cutoff=0.0, absorb="right")
+        mps = MPS([A0, A1])
+        phi = mps.make_phi(0, 2)
+        mps.update_sites(0, phi, max_dim=chi, cutoff=0.0, absorb="right")
+        A_left, A_right = mps[0], mps[1]
 
         # Rebuild phi from split tensors
-        phi_rebuilt = eff.make_phi(A_left, A_right)
+        phi_rebuilt = mps.make_phi(0, 2)
 
         phi_np       = phi.get_block().numpy().ravel()
         phi_rebuilt_np = phi_rebuilt.get_block().numpy().ravel()
@@ -617,10 +620,10 @@ class TestEffOperatorSplitPhi(unittest.TestCase):
                              arr=rng.standard_normal((1, d, chi)).astype(complex))
         A1 = _make_mps_site(chi, d, 1,
                              arr=rng.standard_normal((chi, d, 1)).astype(complex))
-        phi = eff.make_phi(A0, A1)
-
-        A_left, A_right = eff.split_phi(phi, max_dim=keep, cutoff=0.0,
-                                         absorb="right")
+        mps = MPS([A0, A1])
+        phi = mps.make_phi(0, 2)
+        mps.update_sites(0, phi, max_dim=keep, cutoff=0.0, absorb="right")
+        A_left, A_right = mps[0], mps[1]
 
         # The shared bond ("r" of A_left = "l" of A_right) must be ≤ keep.
         shape_left  = {l: s for l, s in zip(A_left.labels(),  A_left.shape())}
@@ -631,14 +634,13 @@ class TestEffOperatorSplitPhi(unittest.TestCase):
                              "Right tensor's 'l' bond must be truncated.")
 
     def test_0site_split_raises(self):
-        """split_phi on 0-site EffOperator → NotImplementedError."""
-        L, R = _trivial_op_env_LR(d=2)
-        eff = EffOperator(L, R)
+        """MPS.update_sites with 0-site phi raises NotImplementedError."""
+        mps = MPS([_make_mps_site(1, 2, 1)])
         arr = np.ones((1, 1), dtype=complex)
         phi = cytnx.UniTensor(cytnx.from_numpy(arr), rowrank=1)
         phi.set_labels(["l", "r"])
         with self.assertRaises(NotImplementedError):
-            eff.split_phi(phi, max_dim=1, cutoff=0.0, absorb="right")
+            mps.update_sites(0, phi, max_dim=1, cutoff=0.0, absorb="right")
 
 
 # ===========================================================================
@@ -666,13 +668,13 @@ class TestEffOperatorIntegration(unittest.TestCase):
     def test_rayleigh_quotient_identity_mpo(self):
         """<φ|H_eff|φ> / <φ|φ> = 1 for identity MPO, product-state MPS."""
         p = 1   # 2-site block: sites [1, 2]
-        self.op_env.update_LR(p, p + 1)   # stale window = [1, 2]
+        self.op_env.update_envs(p, p + 1)   # stale window = [1, 2]
 
         L = self.op_env[p - 1]
         R = self.op_env[p + 2]
 
         eff = EffOperator(L, R, self.mpo[p], self.mpo[p + 1])
-        phi = eff.make_phi(self.mps[p], self.mps[p + 1])
+        phi = self.mps.make_phi(p, 2)
 
         H_phi = eff.apply(phi)
 

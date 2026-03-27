@@ -34,7 +34,7 @@ from pathlib import Path
 import numpy as np
 
 THIS_DIR = Path(__file__).resolve().parent
-PKG_ROOT = THIS_DIR.parent.parent
+PKG_ROOT = THIS_DIR.parent.parent.parent
 if str(PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(PKG_ROOT))
 
@@ -45,7 +45,7 @@ except ImportError:
 
 if cytnx is not None:
     from MPS.mps_init import random_mps
-    from MPS.hamiltonian import heisenberg_mpo
+    from tests.helpers.heisenberg import heisenberg_mpo
     from DMRG.dmrg_engine import DMRGEngine
 
 

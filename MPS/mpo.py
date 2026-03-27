@@ -10,16 +10,9 @@ UniTensor label convention (every site tensor MUST follow this):
 Each site is rank 4. Internal axis order may vary; the label set must be exactly
 `{"l", "ip", "i", "r"}`.
 
-Boundary tensors `L0` and `R0` have labels `["mid", "up", "dn"]` and shape
-`[d_mpo, 1, 1]`, where `d_mpo` is the MPO virtual bond dimension at that end.
-They are constructed automatically from the MPO's endpoint bonds following the
-standard upper-triangular MPO convention:
-
-    L0[d_mpo - 1, 0, 0] = 1.0   (selects the last MPO virtual state on the left)
-    R0[0,         0, 0] = 1.0   (selects the first MPO virtual state on the right)
-
-Custom boundary tensors can be supplied via the `L0` / `R0` keyword arguments of
-`__init__`.
+The boundary bonds W[0]["l"] and W[-1]["r"] must each have dimension 1.  Open-boundary
+conditions are encoded directly into the endpoint site tensors; boundary tensors for
+DMRG contractions are constructed by OperatorEnv from the MPS and MPO edge bonds.
 """
 
 from __future__ import annotations
@@ -38,9 +31,9 @@ except ImportError as exc:
     ) from exc
 
 from .uniTensor_core import assert_bond_match, svd_by_labels
+from .uniTensor_utils import any_complex_tensors
 
 MPO_SITE_LABELS = frozenset({"l", "ip", "i", "r"})
-MPO_BOUNDARY_LABELS = frozenset({"mid", "up", "dn"})
 
 
 def assert_mpo_site_labels(tensor: "cytnx.UniTensor", site: int) -> None:
@@ -55,44 +48,24 @@ def assert_mpo_site_labels(tensor: "cytnx.UniTensor", site: int) -> None:
         )
 
 
-def _assert_boundary_tensor(tensor: "cytnx.UniTensor", name: str) -> None:
-    """Raise ValueError if boundary tensor labels are not exactly mid, up, dn."""
-    if set(tensor.labels()) != MPO_BOUNDARY_LABELS:
-        raise ValueError(
-            f"{name} labels must be exactly mid, up, dn; got {tensor.labels()}."
-        )
-    if tensor.bond("up").dim() != 1 or tensor.bond("dn").dim() != 1:
-        raise ValueError(
-            f"{name} bonds 'up' and 'dn' must each have dimension 1."
-        )
-
-
 class MPO:
     """Open-boundary MPO with UniTensor site tensors (labels `l`, `ip`, `i`, `r`).
 
-    Boundary tensors `L0` and `R0` are stored as attributes and are constructed
-    automatically unless overridden.
+    The endpoint bonds W[0]["l"] and W[-1]["r"] must have dimension 1; open-boundary
+    conditions are encoded directly into the endpoint tensors.
     """
 
-    def __init__(
-        self,
-        tensors: Iterable,
-        *,
-        L0: "cytnx.UniTensor | None" = None,
-        R0: "cytnx.UniTensor | None" = None,
-    ) -> None:
+    def __init__(self, tensors: Iterable) -> None:
         """Load site tensors left to right; validate labels and bonds.
 
         Args:
             tensors: Iterable of cytnx.UniTensor with labels {l, ip, i, r}.
-            L0: Optional custom left boundary tensor (labels mid, up, dn).
-                If None, constructed automatically.
-            R0: Optional custom right boundary tensor (labels mid, up, dn).
-                If None, constructed automatically.
+                     W[0]["l"] and W[-1]["r"] must each have dimension 1.
 
         Raises:
             ValueError: If tensors is empty, labels are wrong, physical bonds are
-                inconsistent, or neighbor virtual bonds do not match.
+                inconsistent, neighbor virtual bonds do not match, or endpoint bond
+                dimensions are not 1.
             TypeError: If any element is not cytnx.UniTensor.
         """
         self.tensors = list(tensors)
@@ -105,18 +78,6 @@ class MPO:
                 )
             assert_mpo_site_labels(tensor, i)
         self._validate_bonds()
-
-        if L0 is None and R0 is None:
-            self.L0, self.R0 = self._make_boundary_tensors()
-        else:
-            if L0 is None or R0 is None:
-                raise ValueError(
-                    "Both L0 and R0 must be provided together, or neither."
-                )
-            _assert_boundary_tensor(L0, "L0")
-            _assert_boundary_tensor(R0, "R0")
-            self.L0 = L0
-            self.R0 = R0
         # Observer callbacks: same mechanism as MPS.  See MPS.register_callback.
         self._callbacks: list = []
 
@@ -189,6 +150,11 @@ class MPO:
         dims.extend(tensor.bond("r").dim() for tensor in self.tensors)
         return dims
 
+    @property
+    def is_complex(self) -> bool:
+        """Whether any site tensor uses a complex dtype."""
+        return any_complex_tensors(self.tensors)
+
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
@@ -199,16 +165,13 @@ class MPO:
             assert_mpo_site_labels(tensor, i)
 
     def _validate_bonds(self) -> None:
-        """Validate labels, physical bond consistency, and neighbor virtual bonds.
+        """Validate labels, physical bond consistency, neighbor virtual bonds, and endpoints.
 
         Checks:
         1. Every site has rank-4 and labels exactly {l, ip, i, r}.
         2. Physical bond consistency: bond('i') matches bond('ip') up to direction.
         3. Neighbor virtual bonds: mpo[p].bond('r') matches mpo[p+1].bond('l').
-
-        Note: Unlike MPS, the MPO endpoint bonds are NOT required to have dim == 1.
-        Open-boundary conditions are enforced via L0/R0 (whose 'up'/'dn' bonds have
-        dim == 1), not by restricting the MPO virtual bond dimensions.
+        4. Endpoint bonds: W[0]["l"].dim() == 1 and W[-1]["r"].dim() == 1.
         """
         self.check_site_labels()
         for site, tensor in enumerate(self.tensors):
@@ -230,40 +193,21 @@ class MPO:
                     f"Virtual bond mismatch between sites {site} and {site + 1}."
                 ) from exc
 
-    # ------------------------------------------------------------------
-    # Boundary tensors
-    # ------------------------------------------------------------------
-
-    def _make_boundary_tensors(
-        self,
-    ) -> tuple["cytnx.UniTensor", "cytnx.UniTensor"]:
-        """Construct L0 and R0 from the MPO endpoint bonds.
-
-        Uses the standard upper-triangular MPO convention:
-            L0[d_l - 1, 0, 0] = 1.0
-            R0[0,        0, 0] = 1.0
-        """
-        d_l = self.tensors[0].bond("l").dim()
-        d_r = self.tensors[-1].bond("r").dim()
-
-        arr_l = np.zeros((d_l, 1, 1), dtype=float)
-        arr_l[d_l - 1, 0, 0] = 1.0
-        L0 = cytnx.UniTensor(cytnx.from_numpy(arr_l), rowrank=1)
-        L0.set_labels(["mid", "up", "dn"])
-
-        arr_r = np.zeros((d_r, 1, 1), dtype=float)
-        arr_r[0, 0, 0] = 1.0
-        R0 = cytnx.UniTensor(cytnx.from_numpy(arr_r), rowrank=1)
-        R0.set_labels(["mid", "up", "dn"])
-
-        return L0, R0
+        if self.tensors[0].bond("l").dim() != 1:
+            raise ValueError(
+                f"W[0]['l'] must have dim=1; got {self.tensors[0].bond('l').dim()}."
+            )
+        if self.tensors[-1].bond("r").dim() != 1:
+            raise ValueError(
+                f"W[-1]['r'] must have dim=1; got {self.tensors[-1].bond('r').dim()}."
+            )
 
     # ------------------------------------------------------------------
     # Copy
     # ------------------------------------------------------------------
 
     def copy(self) -> "MPO":
-        """Deep copy via `UniTensor.clone()`; L0/R0 are reconstructed."""
+        """Deep copy via `UniTensor.clone()`."""
         cloned = [tensor.clone() for tensor in self.tensors]
         return MPO(cloned)
 
@@ -323,6 +267,4 @@ class MPO:
         kept_dim = left_new.bond("r").dim()
         self.tensors[bond] = left_new
         self.tensors[bond + 1] = right_new
-        # Recompute L0/R0 in case endpoint bond dims changed.
-        self.L0, self.R0 = self._make_boundary_tensors()
         return kept_dim, discarded

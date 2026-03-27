@@ -32,7 +32,7 @@ except ImportError as exc:
     ) from exc
 
 from .uniTensor_core import assert_bond_match, qr_by_labels, scalar_from_uniTensor, svd_by_labels
-from .uniTensor_utils import to_numpy_array
+from .uniTensor_utils import any_complex_tensors, to_numpy_array
 
 MPS_SITE_LABELS = frozenset({"l", "i", "r"})
 
@@ -182,6 +182,24 @@ class MPS:
         """Largest bond dimension."""
         return max(self.bond_dims)
 
+    @property
+    def is_complex(self) -> bool:
+        """Whether any site tensor uses a complex dtype."""
+        return any_complex_tensors(self.tensors)
+
+    @property
+    def total_qn(self) -> list[int]:
+        """Total quantum number of the MPS.
+
+        Returns the QN of the last site's right virtual bond, which equals the
+        sum of all physical QNs (Convention B: QN accumulates left-to-right).
+        Returns [] for dense (no-symmetry) MPS.
+        """
+        b = self.tensors[-1].bond("r")
+        if b.Nsym() == 0:
+            return []
+        return list(b.qnums()[0])
+
     def copy(self) -> "MPS":
         """Deep copy via `UniTensor.clone()`."""
         cloned = [tensor.clone() for tensor in self.tensors]
@@ -195,7 +213,12 @@ class MPS:
         self._check_compatible(other)
         l1 = self.tensors[0].bond("l").redirect()
         l2 = other.tensors[0].bond("l")
-        env = cytnx.UniTensor([l1, l2], labels=["dn", "up"])
+        env_dtype = (
+            cytnx.Type.ComplexDouble
+            if (self.is_complex or other.is_complex)
+            else cytnx.Type.Double
+        )
+        env = cytnx.UniTensor([l1, l2], labels=["dn", "up"], dtype=env_dtype)
         env.at([0, 0]).value = 1.0
 
         for tensor_self, tensor_other in zip(self.tensors, other.tensors):
@@ -386,14 +409,20 @@ class MPS:
         return kept_dim, discarded
 
     def _check_compatible(self, other: "MPS") -> None:
-        """Same length and `phys_dims`."""
+        """Same length and physical bond structure at every site."""
         if len(self) != len(other):
             raise ValueError("Both MPS objects must have the same number of sites.")
         for site, (tensor_self, tensor_other) in enumerate(zip(self.tensors, other.tensors)):
-            try:
-                assert_bond_match(tensor_self.bond("i"), tensor_other.bond("i"))
-            except ValueError as exc:
-                raise ValueError(f"Physical bond mismatch at site {site}.") from exc
+            b1 = tensor_self.bond("i")
+            b2 = tensor_other.bond("i")
+            mismatch = (
+                b1.dim() != b2.dim()
+                or b1.Nsym() != b2.Nsym()
+                or b1.qnums() != b2.qnums()
+                or b1.getDegeneracies() != b2.getDegeneracies()
+            )
+            if mismatch:
+                raise ValueError(f"Physical bond mismatch at site {site}.")
 
     # ------------------------------------------------------------------
     # φ label convention  (single source of truth)

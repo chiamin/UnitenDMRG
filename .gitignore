@@ -38,6 +38,7 @@ Thumbs.db
 # Temporary / local
 old/
 *.log
+_internal/
 
 # Claude Code
 .claude/

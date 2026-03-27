@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Iterable
+
 import cytnx
 import numpy as np
 
@@ -34,3 +36,18 @@ def print_bonds(tensor: "cytnx.UniTensor") -> None:
     print(tensor.shape())
     for bond in tensor.bonds():
         print_bond(bond)
+
+
+def is_complex_tensor(tensor: "cytnx.UniTensor") -> bool:
+    """Return True if a UniTensor uses a complex dtype."""
+    if not isinstance(tensor, cytnx.UniTensor):
+        raise TypeError(f"Expected cytnx.UniTensor, got {type(tensor).__name__}.")
+    return "Complex" in tensor.dtype_str()
+
+
+def any_complex_tensors(tensors: Iterable["cytnx.UniTensor"]) -> bool:
+    """Return True if any UniTensor in the iterable is complex."""
+    for tensor in tensors:
+        if is_complex_tensor(tensor):
+            return True
+    return False

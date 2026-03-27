@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import sys
 
 import numpy as np
@@ -54,24 +53,13 @@ def qr_by_labels(
     )
     ordered_labels = row_labels + col_labels
     ordered = tensor.permute(ordered_labels)
-    shape_map = {label: dim for label, dim in zip(ordered_labels, ordered.shape())}
+    ordered.set_rowrank_(len(row_labels))
 
-    row_shape = [shape_map[label] for label in row_labels]
-    col_shape = [shape_map[label] for label in col_labels]
-    row_size = math.prod(row_shape)
-    col_size = math.prod(col_shape)
+    q, r = cytnx.linalg.Qr(ordered)
 
-    matrix = ordered.reshape(row_size, col_size)
-    matrix.set_rowrank_(1)
-
-    q, r = cytnx.linalg.Qr(matrix)
-    aux_dim = q.shape()[1]
-
-    q.reshape_(*row_shape, aux_dim)
     q.set_labels(row_labels + [aux_label])
     q.set_rowrank_(len(row_labels))
 
-    r.reshape_(aux_dim, *col_shape)
     r.set_labels([aux_label] + col_labels)
     r.set_rowrank_(1)
     return q, r
@@ -107,25 +95,22 @@ def svd_by_labels(
     )
     ordered_labels = row_labels + col_labels
     ordered = tensor.permute(ordered_labels)
-    shape_map = {label: d for label, d in zip(ordered_labels, ordered.shape())}
+    ordered.set_rowrank_(len(row_labels))
 
-    row_shape = [shape_map[label] for label in row_labels]
-    col_shape = [shape_map[label] for label in col_labels]
-    row_size = math.prod(row_shape)
-    col_size = math.prod(col_shape)
+    total_sq = float(ordered.Norm().item()) ** 2
 
-    matrix = ordered.reshape(row_size, col_size)
-    matrix.set_rowrank_(1)
-
-    total_sq = float(np.sum(np.abs(matrix.get_block().numpy()) ** 2))
-
-    s, left, right = cytnx.linalg.Svd_truncate(matrix, keepdim=dim, err=cutoff)
+    s, left, right = cytnx.linalg.Svd_truncate(ordered, keepdim=dim, err=cutoff)
     kept_sq = _kept_weight(s)
     discarded = max(0.0, total_sq - kept_sq)
 
     # SVD convention: aux bond of u is its last index; aux bond of vt is its first index.
     aux_in_left = left.labels()[-1]
     aux_in_right = right.labels()[0]
+
+    # s always has real dtype; left/right may be complex (e.g. after Lanczos).
+    # Cast s to match so that Contract does not fail with "real += complex".
+    if s.dtype() != left.dtype():
+        s = s.astype(left.dtype())
 
     if absorb == "left":
         left = cytnx.Contract(left, s)
@@ -135,13 +120,10 @@ def svd_by_labels(
         s.relabel_(aux_in_left, aux_label)
         s.relabel_(aux_in_right, aux_label + "_r")
 
-    aux_dim = left.shape()[-1]
-    left.reshape_(*row_shape, aux_dim)
     left.set_labels(row_labels + [aux_label])
     left.set_rowrank_(len(row_labels))
 
     aux_right_label = aux_label + "_r" if absorb is None else aux_label
-    right.reshape_(aux_dim, *col_shape)
     right.set_labels([aux_right_label] + col_labels)
     right.set_rowrank_(1)
 
@@ -169,6 +151,63 @@ def assert_bond_match(b1: "cytnx.Bond", b2: "cytnx.Bond") -> None:
         raise ValueError("Bond qnums mismatch.")
     if b1.getDegeneracies() != b2.getDegeneracies():
         raise ValueError("Bond degeneracies mismatch.")
+
+
+def _bond_sector_at(bond: "cytnx.Bond", idx: int) -> tuple[int, int]:
+    """Return (sector_index, offset_within_sector) for flat basis index idx.
+
+    Iterates through sectors in order, accumulating dims, until the sector
+    containing idx is found.
+
+    Raises IndexError if idx >= bond.dim().
+    """
+    offset = idx
+    for sector_idx, deg in enumerate(bond.getDegeneracies()):
+        if offset < deg:
+            return sector_idx, offset
+        offset -= deg
+    raise IndexError(f"Index {idx} out of range for bond of dim {bond.dim()}.")
+
+
+def bond_qnums_at(bond: "cytnx.Bond", idx: int) -> list[int]:
+    """Return the QN list for flat basis index idx in a bond.
+
+    Returns [] for dense (no-QN) bonds.
+    The returned list has one integer per symmetry in the bond.
+    """
+    if bond.Nsym() == 0:
+        return []
+    sector_idx, _ = _bond_sector_at(bond, idx)
+    return list(bond.qnums()[sector_idx])
+
+
+def derive_delta_qn(matrix: "np.ndarray", bond: "cytnx.Bond") -> int:
+    """Derive the QN charge of a pure-charge operator from its matrix and physical bond.
+
+    A pure-charge operator has the same QN(ip) - QN(i) for every nonzero element.
+    Returns 0 for dense (no-QN) bonds.
+
+    Raises:
+        ValueError: If the operator mixes different QN charges.
+    """
+    if bond.Nsym() == 0:
+        return 0
+    delta = None
+    for ip in range(matrix.shape[0]):
+        for i in range(matrix.shape[1]):
+            if abs(matrix[ip, i]) > 1e-14:
+                qn_ip = bond_qnums_at(bond, ip)
+                qn_i  = bond_qnums_at(bond, i)
+                # Only support single-symmetry bonds for now
+                d = qn_ip[0] - qn_i[0]
+                if delta is None:
+                    delta = d
+                elif delta != d:
+                    raise ValueError(
+                        "Operator is not pure-charge: found mixed QN charges "
+                        f"{delta} and {d}. Decompose into pure-charge terms first."
+                    )
+    return delta if delta is not None else 0
 
 
 def _kept_weight(s_ut: "cytnx.UniTensor") -> float:

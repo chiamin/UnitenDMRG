@@ -21,8 +21,8 @@ EffVector
         inner(phi)                      – ⟨Φ_0|φ⟩  scalar overlap
 
 Both classes receive their left/right environment tensors explicitly (Option A
-design): the caller is responsible for calling OperatorEnv.update_LR /
-VectorEnv.update_LR before constructing these objects.
+design): the caller is responsible for calling OperatorEnv.update_envs /
+VectorEnv.update_envs before constructing these objects.
 """
 
 from __future__ import annotations
@@ -252,6 +252,28 @@ class EffOperator:
         # Physical labels from canonical convention — order is guaranteed.
         phys_in  = [MPS._phi_label(k) for k in range(n)]
         phys_out = [MPS._phi_label(k) + "_out" for k in range(n)]
+
+        # -- 0-site special case --
+        # No MPO tensors: L["mid"] and R["mid"] must contract directly with
+        # each other (they represent the same MPO virtual bond at the cut).
+        # The generic code below leaves "lmid" and "rmid" uncontracted,
+        # producing a 4-index result instead of 2-index.
+        if n == 0:
+            #
+            #   L: ["mid","dn","up"] → ["_mid","ldn","lup"]
+            #   R: ["mid","dn","up"] → ["_mid","rdn","rup"]
+            #   phi: ["l","r"]       → ["ldn","rdn"]
+            #
+            #   Contract order: (L + phi) contracts "ldn",
+            #                   then + R   contracts "_mid" and "rdn".
+            #   Output: ["lup","rup"] → ["l","r"]
+            #
+            L    = self._L.relabels(["mid", "dn", "up"], ["_mid", "ldn", "lup"])
+            R    = self._R.relabels(["mid", "dn", "up"], ["_mid", "rdn", "rup"])
+            phi_r = phi.relabels(["l", "r"], ["ldn", "rdn"])
+            tmp  = cytnx.Contract(L, phi_r)
+            tmp  = cytnx.Contract(tmp, R)
+            return tmp.relabels(["lup", "rup"], ["l", "r"])
 
         # -- Relabel L --
         #

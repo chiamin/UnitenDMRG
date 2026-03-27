@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 THIS_DIR = Path(__file__).resolve().parent
-PKG_ROOT = THIS_DIR.parent.parent
+PKG_ROOT = THIS_DIR.parent.parent.parent
 if str(PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(PKG_ROOT))
 
@@ -33,7 +33,8 @@ if cytnx is not None:
         compress_bond_tensors,
         svd_bond,
     )
-    from MPS.mps_init import product_state, product_state_qn, random_mps
+    from MPS.mps_init import random_mps
+    from MPS.physical_sites import PhysicalSite
     from MPS.uniTensor_core import (
         assert_bond_match,
         qr_by_labels,
@@ -41,6 +42,7 @@ if cytnx is not None:
         svd_by_labels,
     )
     from MPS.uniTensor_utils import print_bond, print_bonds, to_numpy_array, to_uniTensor
+    from MPS.uniTensor_utils import any_complex_tensors, is_complex_tensor
 else:  # pragma: no cover
     MPS = object
 
@@ -50,9 +52,8 @@ else:  # pragma: no cover
     assert_mps_site_uniTensor_labels = _missing_cytnx
     compress_bond_tensors = _missing_cytnx
     svd_bond = _missing_cytnx
-    product_state = _missing_cytnx
-    product_state_qn = _missing_cytnx
     random_mps = _missing_cytnx
+    PhysicalSite = _missing_cytnx
     assert_bond_match = _missing_cytnx
     qr_by_labels = _missing_cytnx
     scalar_from_uniTensor = _missing_cytnx
@@ -61,6 +62,8 @@ else:  # pragma: no cover
     print_bonds = _missing_cytnx
     to_numpy_array = _missing_cytnx
     to_uniTensor = _missing_cytnx
+    any_complex_tensors = _missing_cytnx
+    is_complex_tensor = _missing_cytnx
 
 
 def _make_site(dl: int, d: int, dr: int, start: float = 1.0) -> "cytnx.UniTensor":
@@ -99,6 +102,17 @@ class TestUniTensorUtils(unittest.TestCase):
             print_bonds(tensor)
         text = out.getvalue()
         self.assertIn("2", text)
+
+    def test_complex_dtype_helpers(self) -> None:
+        """dtype helpers should identify real vs complex UniTensors."""
+        real_t = _make_site(1, 2, 1)
+        c_arr = np.array([[[1.0 + 1.0j], [0.0 + 0.0j]]], dtype=complex)
+        c_t = cytnx.UniTensor(cytnx.from_numpy(c_arr), rowrank=2)
+        c_t.set_labels(["l", "i", "r"])
+        self.assertFalse(is_complex_tensor(real_t))
+        self.assertTrue(is_complex_tensor(c_t))
+        self.assertFalse(any_complex_tensors([real_t, real_t]))
+        self.assertTrue(any_complex_tensors([real_t, c_t]))
 
 
 @unittest.skipIf(cytnx is None, "cytnx is required for UniTensor tests")
@@ -283,7 +297,7 @@ class TestMPS(unittest.TestCase):
         self.assertEqual(len(mps), 3)
         self.assertEqual(sum(1 for _ in mps), 3)
         self.assertIsInstance(mps[0], cytnx.UniTensor)
-        self.assertIn("phys_dims", repr(mps))
+        self.assertIn("phys_dim", repr(mps))
         self.assertEqual(mps.phys_dims, [2, 2, 2])
         self.assertEqual(mps.bond_dims, [1, 3, 2, 1])
         self.assertEqual(mps.max_dim, 3)
@@ -408,6 +422,26 @@ class TestMPS(unittest.TestCase):
         self.assertGreater(nrm, 0.0)
         self.assertTrue(np.isfinite(nrm))
 
+    def test_is_complex_false_for_real_mps(self) -> None:
+        """Real-valued MPS should report is_complex == False."""
+        mps = random_mps(num_sites=3, phys_dim=2, bond_dim=3, normalize=False, seed=3)
+        self.assertFalse(mps.is_complex)
+
+    def test_is_complex_true_for_complex_mps(self) -> None:
+        """Complex-valued MPS should report is_complex == True."""
+        mps = random_mps(
+            num_sites=3, phys_dim=2, bond_dim=3, dtype=complex, normalize=False, seed=4
+        )
+        self.assertTrue(mps.is_complex)
+
+    def test_inner_complex_mps_does_not_mismatch_env_dtype(self) -> None:
+        """inner(self) on complex MPS should run without real/complex env mismatch."""
+        mps = random_mps(
+            num_sites=3, phys_dim=2, bond_dim=3, dtype=complex, normalize=False, seed=5
+        )
+        val = mps.inner(mps)
+        self.assertTrue(np.isfinite(float(np.real(val))))
+
     def test_factory_random_mps_seed_reproducibility(self) -> None:
         """random_mps with the same seed should produce identical tensors."""
         m1 = random_mps(num_sites=3, phys_dim=2, bond_dim=4, normalize=False, seed=42)
@@ -428,7 +462,8 @@ class TestMPS(unittest.TestCase):
         """Factory product_state should create bond-1 one-hot basis tensors."""
         config = [0, 1, 2]
         phys_dim = 3
-        mps = product_state(config, phys_dim)
+        site = PhysicalSite(cytnx.Bond(phys_dim, cytnx.BD_IN))
+        mps = site.product_state(config)
         self.assertEqual(len(mps), 3)
         self.assertEqual(mps.phys_dims, [phys_dim, phys_dim, phys_dim])
         self.assertEqual(mps.bond_dims, [1, 1, 1, 1])
@@ -441,25 +476,26 @@ class TestMPS(unittest.TestCase):
 
     def test_factory_product_state_rejects_invalid_config(self) -> None:
         """Factory product_state should reject invalid config entries."""
+        site = PhysicalSite(cytnx.Bond(2, cytnx.BD_IN))
         with self.assertRaises(ValueError):
-            product_state([], 2)
+            site.product_state([])
         with self.assertRaises(ValueError):
-            product_state([0, 1], 0)
-        with self.assertRaises(ValueError):
-            product_state([0, 2], 2)
+            site.product_state([0, 2])
         with self.assertRaises(TypeError):
-            product_state([0, 1.0], 2)
+            site.product_state([0, 1.0])
 
     def test_factory_product_state_rejects_non_python_int(self) -> None:
         """Factory product_state should reject numpy integer objects."""
+        site = PhysicalSite(cytnx.Bond(2, cytnx.BD_IN))
         with self.assertRaises(TypeError):
-            product_state([0, np.int64(1)], 2)
+            site.product_state([0, np.int64(1)])
 
     def test_factory_product_state_qn(self) -> None:
         """QN product state should build blockform sites for a valid basis index."""
         sym = cytnx.Symmetry.Zn(2)
         phys = cytnx.Bond(cytnx.BD_IN, [[0], [1]], [1, 1], [sym])
-        mps = product_state_qn(num_sites=3, physical_bond=phys, physical_index=0)
+        site = PhysicalSite(phys)
+        mps = site.product_state([0, 0, 0])
         self.assertEqual(len(mps), 3)
         self.assertEqual(mps.bond_dims, [1, 1, 1, 1])
         for tensor in mps:
@@ -468,12 +504,14 @@ class TestMPS(unittest.TestCase):
             block = tensor.get_block_(0)
             self.assertAlmostEqual(float(block[0, 0, 0].item()), 1.0)
 
-    def test_factory_product_state_qn_rejects_nonzero_sector_index(self) -> None:
-        """QN product state should reject indices outside zero-qnum sector."""
+    def test_factory_product_state_qn_accepts_nonzero_sector_index(self) -> None:
+        """PhysicalSite.product_state supports any valid local basis index."""
         sym = cytnx.Symmetry.Zn(2)
         phys = cytnx.Bond(cytnx.BD_IN, [[0], [1]], [1, 1], [sym])
-        with self.assertRaises(ValueError):
-            product_state_qn(num_sites=2, physical_bond=phys, physical_index=1)
+        site = PhysicalSite(phys)
+        mps = site.product_state([1, 1])
+        self.assertEqual(len(mps), 2)
+        self.assertEqual(mps.total_qn, [0])
 
 
 if __name__ == "__main__":

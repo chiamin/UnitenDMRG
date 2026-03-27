@@ -15,7 +15,7 @@ Coverage
    - Mismatched MPS/MPO lengths → AssertionError
    - init_center out of range → AssertionError
    - Stale window is exactly [init_center, init_center] after __init__
-   - Boundary tensors LR[-1]/LR[N] match mpo.L0 / mpo.R0
+   - Boundary tensors LR[-1]/LR[N] are rank-3 with labels [mid, dn, up]
    - Valid environments outside the stale window are not None
 
 4. OperatorEnv access & bookkeeping  (TestLRMPOAccess)
@@ -23,10 +23,10 @@ Coverage
    - __getitem__ out of range → ValueError
    - __getitem__ on valid left/right env succeeds
    - delete(p): stale window expands to include p
-   - update_LR: stale window shrinks; previously-stale envs become accessible
-   - update_LR with centerL > centerR+1 → ValueError
-   - update_LR with out-of-range indices → ValueError
-   - update_LR(p, p-1): empty stale window — all sites accessible
+   - update_envs: stale window shrinks; previously-stale envs become accessible
+   - update_envs with centerL > centerR+1 → ValueError
+   - update_envs with out-of-range indices → ValueError
+   - update_envs(p, p-1): empty stale window — all sites accessible
 
 5. OperatorEnv ↔ Observer integration  (TestLRMPOObserver)
    - Updating mps1[p] via __setitem__ automatically calls delete(p) on LR
@@ -63,7 +63,7 @@ from pathlib import Path
 import numpy as np
 
 THIS_DIR = Path(__file__).resolve().parent
-PKG_ROOT = THIS_DIR.parent.parent
+PKG_ROOT = THIS_DIR.parent.parent.parent
 if str(PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(PKG_ROOT))
 
@@ -75,9 +75,9 @@ except ImportError:
 if cytnx is not None:
     from MPS.mps import MPS
     from MPS.mpo import MPO
-    from MPS.mps_init import random_mps, product_state
+    from MPS.mps_init import random_mps
     from MPS.uniTensor_utils import to_numpy_array
-    from MPS.dmrg.environment import (
+    from DMRG.environment import (
         OperatorEnv,
         VectorEnv,
     )
@@ -122,9 +122,15 @@ def _make_identity_mpo(N: int, d: int) -> "MPO":
     return MPO(tensors)
 
 
-def _make_random_mps(N: int, d: int = 2, D: int = 4, seed: int = 0) -> "MPS":
+def _make_random_mps(
+    N: int,
+    d: int = 2,
+    D: int = 4,
+    seed: int = 0,
+    dtype: np.dtype | type = float,
+) -> "MPS":
     """Return a normalised random MPS."""
-    return random_mps(N, d, D, seed=seed, normalize=True)
+    return random_mps(N, d, D, seed=seed, normalize=True, dtype=dtype)
 
 
 # Simple counter class used as a callback observer in tests.
@@ -281,13 +287,24 @@ class TestLRMPOInit(unittest.TestCase):
                              f"centerR should be {center}, got {lr.centerR}")
 
     def test_boundary_tensors_stored_correctly(self):
-        """LR[-1] must be mpo.L0 and LR[N] must be mpo.R0 after init."""
+        """LR[-1] and LR[N] must be rank-3 tensors with labels [mid, dn, up]."""
         mps = _make_random_mps(4, d=2, D=3, seed=0)
         mpo = _make_identity_mpo(4, d=2)
         lr = OperatorEnv(mps, mps, mpo)
-        # Identity check via object identity (same Python object)
-        self.assertIs(lr.LR[-1], mpo.L0)
-        self.assertIs(lr.LR[4], mpo.R0)
+        L0 = lr.LR[-1]
+        R0 = lr.LR[4]
+        self.assertEqual(set(L0.labels()), {"mid", "dn", "up"})
+        self.assertEqual(set(R0.labels()), {"mid", "dn", "up"})
+        self.assertEqual(len(L0.shape()), 3)
+        self.assertEqual(len(R0.shape()), 3)
+
+    def test_boundary_dtype_promotes_to_complex(self):
+        """Boundary tensors become complex if any input tensor is complex."""
+        mps = _make_random_mps(4, d=2, D=3, seed=0, dtype=complex)
+        mpo = _make_identity_mpo(4, d=2)
+        lr = OperatorEnv(mps, mps, mpo)
+        self.assertIn("Complex", lr.LR[-1].dtype_str())
+        self.assertIn("Complex", lr.LR[4].dtype_str())
 
     def test_left_environments_valid_after_init(self):
         """LR[p] for p < init_center must be non-None (computed during init)."""
@@ -317,7 +334,7 @@ class TestLRMPOInit(unittest.TestCase):
 
 @unittest.skipIf(cytnx is None, "cytnx not available")
 class TestLRMPOAccess(unittest.TestCase):
-    """__getitem__, delete, and update_LR bookkeeping for OperatorEnv."""
+    """__getitem__, delete, and update_envs bookkeeping for OperatorEnv."""
 
     def setUp(self):
         N, d, D = 5, 2, 3
@@ -387,14 +404,14 @@ class TestLRMPOAccess(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.lr.delete(self.N + 1)
 
-    def test_update_LR_shrinks_stale_window(self):
-        """update_LR(new_left, new_right) shrinks [centerL, centerR] as requested."""
+    def test_update_envs_shrinks_stale_window(self):
+        """update_envs(new_left, new_right) shrinks [centerL, centerR] as requested."""
         # Current stale window: [2, 2].  Grow it first by deleting more sites.
         self.lr.delete(0)
         self.lr.delete(4)
         # Now stale window is [0, 4] (whole chain plus boundaries of each side).
         # Update to shrink stale window to [2, 2].
-        self.lr.update_LR(2, 2)
+        self.lr.update_envs(2, 2)
         self.assertEqual(self.lr.centerL, 2)
         self.assertEqual(self.lr.centerR, 2)
         # LR[0] and LR[1] should now be recomputed (valid).
@@ -404,38 +421,38 @@ class TestLRMPOAccess(unittest.TestCase):
         env_right = self.lr[3]
         self.assertIsNotNone(env_right)
 
-    def test_update_LR_previously_stale_now_accessible(self):
-        """After update_LR, sites that were stale and are now outside the window are accessible."""
+    def test_update_envs_previously_stale_now_accessible(self):
+        """After update_envs, sites that were stale and are now outside the window are accessible."""
         # Expand stale window to cover site 1.
         self.lr.delete(1)
         # Rebuild: shrink stale window back to [2, 2].
-        self.lr.update_LR(2, 2)
+        self.lr.update_envs(2, 2)
         # LR[1] should now be a freshly computed valid env.
         env = self.lr[1]
         self.assertIsNotNone(env)
 
-    def test_update_LR_invalid_window_raises(self):
-        """update_LR with centerL > centerR + 1 raises ValueError."""
+    def test_update_envs_invalid_window_raises(self):
+        """update_envs with centerL > centerR + 1 raises ValueError."""
         with self.assertRaises(ValueError):
-            self.lr.update_LR(4, 2)  # centerL=4 > centerR+1=3
+            self.lr.update_envs(4, 2)  # centerL=4 > centerR+1=3
 
-    def test_update_LR_out_of_range_raises(self):
-        """update_LR with out-of-range index raises ValueError."""
+    def test_update_envs_out_of_range_raises(self):
+        """update_envs with out-of-range index raises ValueError."""
         with self.assertRaises(ValueError):
-            self.lr.update_LR(-2, 2)
+            self.lr.update_envs(-2, 2)
         with self.assertRaises(ValueError):
-            self.lr.update_LR(1, self.N + 1)
+            self.lr.update_envs(1, self.N + 1)
 
-    def test_update_LR_single_site(self):
-        """update_LR(p) with one argument sets centerL = centerR = p."""
+    def test_update_envs_single_site(self):
+        """update_envs(p) with one argument sets centerL = centerR = p."""
         self.lr.delete(0)
         self.lr.delete(4)
-        self.lr.update_LR(2)  # should default centerR to centerL = 2
+        self.lr.update_envs(2)  # should default centerR to centerL = 2
         self.assertEqual(self.lr.centerL, 2)
         self.assertEqual(self.lr.centerR, 2)
 
-    def test_update_LR_empty_stale_window(self):
-        """update_LR(p, p-1) creates an empty stale window (centerL = centerR + 1).
+    def test_update_envs_empty_stale_window(self):
+        """update_envs(p, p-1) creates an empty stale window (centerL = centerR + 1).
 
         After this call, every environment from LR[-1] to LR[N] must be
         accessible (no sites are stale).
@@ -445,7 +462,7 @@ class TestLRMPOAccess(unittest.TestCase):
         self.lr.delete(self.N - 1)
         # Now shrink to an empty stale window: centerL = N, centerR = N-1
         # i.e. no site is stale.
-        self.lr.update_LR(self.N, self.N - 1)
+        self.lr.update_envs(self.N, self.N - 1)
         self.assertEqual(self.lr.centerL, self.N)
         self.assertEqual(self.lr.centerR, self.N - 1)
         # Every environment must now be accessible.
@@ -526,7 +543,7 @@ class TestLRMPOMath(unittest.TestCase):
         # Expand stale window to entire chain, then shrink to [N, N] so that
         # all left-environments LR[-1..N-1] are computed.
         lr.delete(N - 1)     # stale window now covers [0, N-1]
-        lr.update_LR(N, N)   # recompute left envs; stale window shrinks to [N, N]
+        lr.update_envs(N, N)   # recompute left envs; stale window shrinks to [N, N]
         return lr
 
     def _scalar_from_1x1x1_tensor(self, t: "cytnx.UniTensor") -> float:
@@ -643,6 +660,14 @@ class TestLRMPSInit(unittest.TestCase):
         self.assertEqual(set(lr.LR[-1].labels()), {"dn", "up"})
         self.assertEqual(set(lr.LR[4].labels()), {"dn", "up"})
 
+    def test_boundary_dtype_promotes_to_complex(self):
+        """VectorEnv boundaries become complex if either MPS is complex."""
+        mps1 = _make_random_mps(4, d=2, D=3, seed=4, dtype=complex)
+        mps2 = _make_random_mps(4, d=2, D=3, seed=5)
+        lr = VectorEnv(mps1, mps2)
+        self.assertIn("Complex", lr.LR[-1].dtype_str())
+        self.assertIn("Complex", lr.LR[4].dtype_str())
+
     def test_valid_envs_outside_stale_window(self):
         """Environments outside [centerL, centerR] must be non-None after init."""
         mps = _make_random_mps(5, d=2, D=3, seed=4)
@@ -725,7 +750,7 @@ class TestLRMPSMath(unittest.TestCase):
         N = len(mps1)
         lr = VectorEnv(mps1, mps2, init_center=0)
         lr.delete(N - 1)     # stale window now covers entire chain
-        lr.update_LR(N, N)   # recompute all left envs
+        lr.update_envs(N, N)   # recompute all left envs
         return lr
 
     def _scalar_from_1x1_tensor(self, t: "cytnx.UniTensor") -> complex:
@@ -771,7 +796,7 @@ class TestLRMPSMath(unittest.TestCase):
     def test_right_env_contraction_matches_inner(self):
         """Full right sweep: LR[0] (incorporating sites N-1..0) matches mps1.inner(mps2).
 
-        After `update_LR(-1, -1)`, LR[0] is the right environment built from the
+        After `update_envs(-1, -1)`, LR[0] is the right environment built from the
         full chain.  Contracting it with L0 gives the overlap scalar.
         """
         N, d, D = 4, 2, 3
@@ -780,7 +805,7 @@ class TestLRMPSMath(unittest.TestCase):
         lr = VectorEnv(mps1, mps2, init_center=N - 1)
         # Expand stale window to entire chain, then shrink to [-1, -1].
         lr.delete(0)
-        lr.update_LR(-1, -1)   # compute all right envs; stale = [-1, -1]
+        lr.update_envs(-1, -1)   # compute all right envs; stale = [-1, -1]
         env = lr[0]   # right env incorporating sites 0..N-1, shape [1,1]
         val_lr = self._scalar_from_1x1_tensor(env)
         val_ref = complex(mps1.inner(mps2))

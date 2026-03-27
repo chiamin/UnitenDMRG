@@ -6,12 +6,20 @@ A Python implementation of the **Density Matrix Renormalization Group (DMRG)** a
 
 ```python
 from MPS.mps_init import random_mps
-from MPS.hamiltonian import heisenberg_mpo
+from MPS.physical_sites import spin_half
+from MPS.auto_mpo import AutoMPO
 from DMRG.dmrg_engine import DMRGEngine
 
 N = 10  # number of sites
 
-H   = heisenberg_mpo(N, J=1.0, delta=1.0, h=0.0)
+site = spin_half()
+ampo = AutoMPO(N, site)
+for i in range(N - 1):
+    ampo.add(1.0, "Sz", i, "Sz", i + 1)
+    ampo.add(0.5, "Sp", i, "Sm", i + 1)
+    ampo.add(0.5, "Sm", i, "Sp", i + 1)
+H = ampo.to_mpo()
+
 psi = random_mps(N, phys_dim=2, bond_dim=4, seed=42)
 psi.move_center(0)
 
@@ -41,6 +49,6 @@ See [examples/example_dmrg.py](examples/example_dmrg.py) for a complete runnable
 To verify that Cytnx is installed correctly:
 
 ```bash
-python test_install.py
+python tests/smoke/test_install.py
 ```
 

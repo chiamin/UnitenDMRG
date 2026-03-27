@@ -96,6 +96,55 @@ def lanczos(apply, v0: "cytnx.UniTensor", k: int = 20) -> tuple:
     return float(evals[0].real), psi
 
 
+def lanczos_expm_multiply(
+    apply, v0: "cytnx.UniTensor", dt: complex | float, k: int = 20
+) -> "cytnx.UniTensor":
+    """Compute exp(dt * H_eff) |v0> using a Lanczos-Krylov approximation.
+
+    Builds a Krylov basis of size k and applies the matrix exponential only
+    within that small subspace, then projects back to the original space.
+
+    Parameters
+    ----------
+    apply : callable
+        apply(v) -> v'  —  the matrix-vector product H|v>.
+    v0 : UniTensor
+        Initial vector.  Need not be normalised; the norm is preserved in
+        the output (i.e. exp(dt*H) acts on the un-normalised v0).
+    dt : complex | float
+        Time argument.  Can be complex (e.g. dt = -1j*delta_t for real-time
+        TDVP, or dt = -delta_tau for imaginary-time decay).
+    k : int
+        Maximum number of Lanczos iterations (Krylov dimension).
+
+    Returns
+    -------
+    result : UniTensor   exp(dt * H_eff) |v0>,  same labels as v0.
+
+    """
+    norm0 = v0.Norm().item()
+    T, vecs = _lanczos_iterations(apply, v0, k)
+
+    # Initial state in Krylov basis: e0 = [1, 0, ..., 0]
+    e0 = np.zeros(len(T))
+    e0[0] = 1.0
+
+    # Evolve in the small Krylov subspace and project back.
+    evals, evecs = np.linalg.eigh(T)
+    vt = evecs @ (np.exp(dt * evals) * (evecs.T @ e0))
+
+    _labels = list(v0.labels())
+    result = vt[0] * vecs[0]
+    for i in range(1, len(vecs)):
+        result = result + vt[i] * vecs[i]
+        result.set_labels(_labels)
+
+    # _lanczos_iterations normalises v0 to unit norm; restore original scale.
+    result = result * norm0
+    result.set_labels(_labels)
+    return result
+
+
 def _lanczos_iterations(apply, v0: "cytnx.UniTensor", k: int) -> tuple:
     """Core Lanczos iteration: build tridiagonal matrix T and Krylov basis.
 
@@ -124,7 +173,7 @@ def _lanczos_iterations(apply, v0: "cytnx.UniTensor", k: int) -> tuple:
     v = v0 * (1. / norm0)
     vecs = [v]
 
-    T = np.zeros((k, k), dtype=complex)
+    T = np.zeros((k, k), dtype=float)
 
     # First Lanczos step
     #
@@ -132,7 +181,7 @@ def _lanczos_iterations(apply, v0: "cytnx.UniTensor", k: int) -> tuple:
     #
     w = apply(v)
     alpha = inner(v, w)                 # <v_0|H|v_0>
-    T[0, 0] = alpha
+    T[0, 0] = float(alpha.real)
     w = _sub(w, alpha * v)
 
     for i in range(1, k):
@@ -156,7 +205,7 @@ def _lanczos_iterations(apply, v0: "cytnx.UniTensor", k: int) -> tuple:
         #
         w = _sub(apply(v), beta * vecs[-2])
         alpha = inner(v, w)             # <v_i|H|v_i>
-        T[i, i] = alpha
+        T[i, i] = float(alpha.real)
         w = _sub(w, alpha * v)
 
         # Re-orthogonalise w against all earlier basis vectors v_0 ... v_{i-1}.

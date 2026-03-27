@@ -1,7 +1,7 @@
 """Unit tests for MPO module.
 
 Coverage:
-- `mpo.py`: MPO API, label validation, bond checks, boundary tensors, compression
+- `mpo.py`: MPO API, label validation, bond checks, endpoint dim=1 enforcement, compression
 
 Tests are skipped automatically if `cytnx` is unavailable.
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 THIS_DIR = Path(__file__).resolve().parent
-PKG_ROOT = THIS_DIR.parent.parent
+PKG_ROOT = THIS_DIR.parent.parent.parent
 if str(PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(PKG_ROOT))
 
@@ -52,11 +52,16 @@ def _make_mpo_site(
 
 
 def _make_mpo(num_sites: int = 3, d: int = 2, D: int = 3) -> "MPO":
-    """Valid open-boundary MPO with uniform physical and virtual dimensions."""
-    tensors = [
-        _make_mpo_site(D, d, D, start=float(p * 100 + 1))
-        for p in range(num_sites)
-    ]
+    """Valid open-boundary MPO with endpoint bonds having dim=1.
+
+    Site 0 has left bond dim=1; site num_sites-1 has right bond dim=1;
+    bulk bonds have dimension D.
+    """
+    tensors = []
+    for p in range(num_sites):
+        dl = 1 if p == 0 else D
+        dr = 1 if p == num_sites - 1 else D
+        tensors.append(_make_mpo_site(dl, d, dr, start=float(p * 100 + 1)))
     return MPO(tensors)
 
 
@@ -88,7 +93,7 @@ class TestMPOSiteLabelValidator(unittest.TestCase):
 
 @unittest.skipIf(cytnx is None, "cytnx is required for MPO tests")
 class TestMPOInit(unittest.TestCase):
-    """Tests for MPO.__init__ and boundary tensor construction."""
+    """Tests for MPO.__init__ and endpoint bond dim=1 enforcement."""
 
     def test_rejects_empty_list(self) -> None:
         with self.assertRaises(ValueError):
@@ -101,68 +106,23 @@ class TestMPOInit(unittest.TestCase):
     def test_accepts_valid_mpo(self) -> None:
         mpo = _make_mpo()
         self.assertEqual(len(mpo), 3)
-        self.assertIsNotNone(mpo.L0)
-        self.assertIsNotNone(mpo.R0)
 
-    def test_l0_r0_labels(self) -> None:
+    def test_endpoint_bonds_dim_one(self) -> None:
         mpo = _make_mpo(D=3)
-        self.assertEqual(set(mpo.L0.labels()), {"mid", "up", "dn"})
-        self.assertEqual(set(mpo.R0.labels()), {"mid", "up", "dn"})
+        self.assertEqual(mpo[0].bond("l").dim(), 1)
+        self.assertEqual(mpo[-1].bond("r").dim(), 1)
 
-    def test_l0_r0_up_dn_dim_one(self) -> None:
-        mpo = _make_mpo(D=3)
-        self.assertEqual(mpo.L0.bond("up").dim(), 1)
-        self.assertEqual(mpo.L0.bond("dn").dim(), 1)
-        self.assertEqual(mpo.R0.bond("up").dim(), 1)
-        self.assertEqual(mpo.R0.bond("dn").dim(), 1)
-
-    def test_l0_boundary_value(self) -> None:
-        D = 3
-        mpo = _make_mpo(D=D)
-        arr = to_numpy_array(mpo.L0)
-        self.assertAlmostEqual(float(arr[D - 1, 0, 0]), 1.0)
-        self.assertAlmostEqual(float(np.sum(arr)), 1.0)
-
-    def test_r0_boundary_value(self) -> None:
-        D = 3
-        mpo = _make_mpo(D=D)
-        arr = to_numpy_array(mpo.R0)
-        self.assertAlmostEqual(float(arr[0, 0, 0]), 1.0)
-        self.assertAlmostEqual(float(np.sum(arr)), 1.0)
-
-    def test_l0_mid_dim_matches_mpo_left_bond(self) -> None:
-        D = 4
-        mpo = _make_mpo(D=D)
-        self.assertEqual(mpo.L0.bond("mid").dim(), D)
-
-    def test_r0_mid_dim_matches_mpo_right_bond(self) -> None:
-        D = 4
-        mpo = _make_mpo(D=D)
-        self.assertEqual(mpo.R0.bond("mid").dim(), D)
-
-    def test_custom_l0_r0_accepted(self) -> None:
-        D = 3
-        tensors = [_make_mpo_site(D, 2, D, start=1.0)]
-        arr_l = np.zeros((D, 1, 1), dtype=float)
-        arr_l[0, 0, 0] = 1.0  # lower-triangular convention
-        L0 = cytnx.UniTensor(cytnx.from_numpy(arr_l), rowrank=1)
-        L0.set_labels(["mid", "up", "dn"])
-        arr_r = np.zeros((D, 1, 1), dtype=float)
-        arr_r[D - 1, 0, 0] = 1.0
-        R0 = cytnx.UniTensor(cytnx.from_numpy(arr_r), rowrank=1)
-        R0.set_labels(["mid", "up", "dn"])
-        mpo = MPO(tensors, L0=L0, R0=R0)
-        self.assertAlmostEqual(float(to_numpy_array(mpo.L0)[0, 0, 0]), 1.0)
-
-    def test_partial_custom_boundary_raises(self) -> None:
-        D = 3
-        tensors = [_make_mpo_site(D, 2, D)]
-        arr_l = np.zeros((D, 1, 1), dtype=float)
-        arr_l[D - 1, 0, 0] = 1.0
-        L0 = cytnx.UniTensor(cytnx.from_numpy(arr_l), rowrank=1)
-        L0.set_labels(["mid", "up", "dn"])
+    def test_non_dim1_left_endpoint_raises(self) -> None:
+        """W[0]['l'] with dim > 1 must raise ValueError at construction."""
+        t = _make_mpo_site(2, 2, 1)   # left dim=2, right dim=1
         with self.assertRaises(ValueError):
-            MPO(tensors, L0=L0)  # R0 missing
+            MPO([t])
+
+    def test_non_dim1_right_endpoint_raises(self) -> None:
+        """W[-1]['r'] with dim > 1 must raise ValueError at construction."""
+        t = _make_mpo_site(1, 2, 2)   # left dim=1, right dim=2
+        with self.assertRaises(ValueError):
+            MPO([t])
 
 
 @unittest.skipIf(cytnx is None, "cytnx is required for MPO tests")
@@ -182,8 +142,8 @@ class TestMPOValidateBonds(unittest.TestCase):
             MPO([u])
 
     def test_virtual_bond_mismatch_raises(self) -> None:
-        t0 = _make_mpo_site(3, 2, 3)   # right bond dim = 3
-        t1 = _make_mpo_site(2, 2, 2)   # left bond dim = 2  ← mismatch
+        t0 = _make_mpo_site(1, 2, 3)   # left dim=1 (valid endpoint), right dim=3
+        t1 = _make_mpo_site(2, 2, 1)   # left dim=2 (mismatch), right dim=1 (valid endpoint)
         with self.assertRaises(ValueError):
             MPO([t0, t1])
 
@@ -224,8 +184,9 @@ class TestMPOProperties(unittest.TestCase):
         mpo = _make_mpo(num_sites=3, d=2, D=3)
         dims = mpo.mpo_dims
         self.assertEqual(len(dims), 4)       # num_sites + 1
-        self.assertEqual(dims[0], 3)          # bond('l') of site 0
-        self.assertEqual(dims[-1], 3)         # bond('r') of last site
+        self.assertEqual(dims[0], 1)          # bond('l') of site 0 must be dim=1
+        self.assertEqual(dims[-1], 1)         # bond('r') of last site must be dim=1
+        self.assertEqual(dims[1], 3)          # bulk bond dim = D
 
     def test_copy_tensors_are_independent(self) -> None:
         mpo = _make_mpo()
@@ -237,6 +198,23 @@ class TestMPOProperties(unittest.TestCase):
         mpo2 = mpo.copy()
         self.assertEqual(mpo2.phys_dims, mpo.phys_dims)
         self.assertEqual(mpo2.mpo_dims, mpo.mpo_dims)
+
+    def test_is_complex_false_for_real_mpo(self) -> None:
+        """Real-valued MPO should report is_complex == False."""
+        mpo = _make_mpo()
+        self.assertFalse(mpo.is_complex)
+
+    def test_is_complex_true_for_complex_mpo(self) -> None:
+        """Complex-valued MPO should report is_complex == True."""
+        mpo = _make_mpo()
+        tensors = []
+        for t in mpo:
+            arr = t.get_block().numpy().astype(complex, copy=True)
+            u = cytnx.UniTensor(cytnx.from_numpy(arr), rowrank=2)
+            u.set_labels(["l", "ip", "i", "r"])
+            tensors.append(u)
+        mpo_c = MPO(tensors)
+        self.assertTrue(mpo_c.is_complex)
 
 
 @unittest.skipIf(cytnx is None, "cytnx is required for MPO tests")
@@ -282,13 +260,6 @@ class TestMPOCompressBond(unittest.TestCase):
         mpo = _make_mpo()
         with self.assertRaises(ValueError):
             mpo.compress_bond(0, max_dim=0)
-
-    def test_compress_bond_updates_l0_r0(self) -> None:
-        mpo = _make_mpo(num_sites=2, d=2, D=4)
-        mpo.compress_bond(0, max_dim=2, cutoff=0.0)
-        # L0 mid dim should still match site-0 left bond
-        self.assertEqual(mpo.L0.bond("mid").dim(), mpo[0].bond("l").dim())
-        self.assertEqual(mpo.R0.bond("mid").dim(), mpo[-1].bond("r").dim())
 
 
 if __name__ == "__main__":

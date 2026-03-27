@@ -4,9 +4,9 @@ Concepts
 --------
 For an N-site system, environment tensors are indexed from -1 to N:
 
-    LR[-1]          : left boundary (provided by MPO.L0 or constructed from MPS bonds)
+    LR[-1]          : left boundary (constructed from MPS and MPO edge bonds)
     LR[0..N-1]      : site environments (left or right, depending on position)
-    LR[N]           : right boundary (provided by MPO.R0 or constructed from MPS bonds)
+    LR[N]           : right boundary (constructed from MPS and MPO edge bonds)
 
 Left environment LR[p] is computed by contracting bra, MPO, ket from site 0 up to
 and including site p (reading left-to-right).  Right environment LR[p] contracts
@@ -20,7 +20,7 @@ Only environments *outside* [centerL, centerR] are guaranteed up-to-date:
     valid right envs : LR[centerR + 1], ..., LR[N-1], LR[N]
     stale (invalid)  : LR[centerL], ..., LR[centerR]
 
-Call ``update_LR(new_centerL, new_centerR)`` to shrink the stale window
+Call ``update_envs(new_centerL, new_centerR)`` to shrink the stale window
 (i.e. compute missing environments).  Call ``delete(i)`` to mark LR[i] as
 stale and expand the stale window.
 
@@ -44,6 +44,8 @@ except ImportError as exc:
     raise ImportError(
         "cytnx is required for environment.py."
     ) from exc
+
+from MPS.uniTensor_utils import any_complex_tensors
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +124,7 @@ class LREnv:
         if self.centerL <= i <= self.centerR:
             raise RuntimeError(
                 f"LR[{i}] is in the stale window [{self.centerL}, {self.centerR}]."
-                " Call update_LR() first."
+                " Call update_envs() first."
             )
         result = self.LR[i]
         assert result is not None, (
@@ -244,7 +246,8 @@ class OperatorEnv(LREnv):
         dn  : bra (mps1) virtual bond
         up  : ket (mps2, conjugated) virtual bond
 
-    The boundary tensors L0 / R0 are taken directly from ``mpo.L0`` / ``mpo.R0``.
+    The boundary tensors L0 / R0 are constructed from the MPS and MPO edge bonds
+    via ``_make_op_boundaries``.
 
     Parameters
     ----------
@@ -264,16 +267,53 @@ class OperatorEnv(LREnv):
         self.mps1 = mps1
         self.mps2 = mps2
         self.mpo = mpo
+        L0, R0 = OperatorEnv._make_op_boundaries(mpo, mps1, mps2)
         super().__init__(
             N=len(mps1),
-            L0=mpo.L0,
-            R0=mpo.R0,
+            L0=L0,
+            R0=R0,
             # Register callbacks on all three objects (mps1, mps2, mpo).
             # Double registration when mps1 is mps2 is harmless because
             # delete() is idempotent (min/max on the same value has no effect).
             tensors_to_watch=[mps1, mps2, mpo],
             init_center=init_center,
         )
+
+    @staticmethod
+    def _make_op_boundaries(mpo, mps1, mps2):
+        """Construct rank-3 left and right boundary tensors from MPO and MPS edge bonds.
+
+        Bond directions are chosen to match the contractions in _grow_left/_grow_right:
+            L0["mid"] BD_OUT contracts with W[0]["l"]  BD_IN
+            L0["dn"]  BD_OUT contracts with mps1[0]["l"] BD_IN
+            L0["up"]  BD_IN  contracts with mps2[0].Dagger()["l"] BD_OUT
+            R0["mid"] BD_IN  contracts with W[-1]["r"] BD_OUT
+            R0["dn"]  BD_IN  contracts with mps1[-1]["r"] BD_OUT
+            R0["up"]  BD_OUT contracts with mps2[-1].Dagger()["r"] BD_IN
+        """
+        use_complex = (
+            any_complex_tensors(mpo)
+            or any_complex_tensors(mps1)
+            or any_complex_tensors(mps2)
+        )
+        ut_dtype = cytnx.Type.ComplexDouble if use_complex else cytnx.Type.Double
+
+        b_mid = mpo[0].bond("l").redirect()
+        b_dn  = mps1[0].bond("l").redirect()
+        b_up  = mps2[0].bond("l")
+        L0 = cytnx.UniTensor(
+            [b_mid, b_dn, b_up], labels=["mid", "dn", "up"], dtype=ut_dtype
+        )
+        L0.at([0, 0, 0]).value = 1.0
+
+        b_mid = mpo[-1].bond("r").redirect()
+        b_dn  = mps1[-1].bond("r").redirect()
+        b_up  = mps2[-1].bond("r")
+        R0 = cytnx.UniTensor(
+            [b_mid, b_dn, b_up], labels=["mid", "dn", "up"], dtype=ut_dtype
+        )
+        R0.at([0, 0, 0]).value = 1.0
+        return L0, R0
 
     def _grow_left(self, p: int, prev_env: "cytnx.UniTensor") -> "cytnx.UniTensor":
         """Extend left environment by one site to the right (incorporating site p).
@@ -366,16 +406,19 @@ class VectorEnv(LREnv):
     @staticmethod
     def _make_boundaries(mps1, mps2):
         """Construct scalar (1x1) left and right boundary tensors from MPS bonds."""
+        use_complex = any_complex_tensors(mps1) or any_complex_tensors(mps2)
+        ut_dtype = cytnx.Type.ComplexDouble if use_complex else cytnx.Type.Double
+
         # Left boundary: dimension-1 bonds from site 0's left bond of each MPS.
         # redirect() flips bond direction so the two bonds can be paired.
         l1 = mps1[0].bond("l").redirect()
         l2 = mps2[0].bond("l")
-        L0 = cytnx.UniTensor([l1, l2], labels=["dn", "up"])
+        L0 = cytnx.UniTensor([l1, l2], labels=["dn", "up"], dtype=ut_dtype)
         L0.at([0, 0]).value = 1.0
 
         r1 = mps1[-1].bond("r").redirect()
         r2 = mps2[-1].bond("r")
-        R0 = cytnx.UniTensor([r1, r2], labels=["dn", "up"])
+        R0 = cytnx.UniTensor([r1, r2], labels=["dn", "up"], dtype=ut_dtype)
         R0.at([0, 0]).value = 1.0
         return L0, R0
 
