@@ -39,6 +39,7 @@ Thumbs.db
 old/
 *.log
 _internal/
+scratch/
 
 # Claude Code
 .claude/

@@ -20,30 +20,25 @@ Only environments *outside* [centerL, centerR] are guaranteed up-to-date:
     valid right envs : LR[centerR + 1], ..., LR[N-1], LR[N]
     stale (invalid)  : LR[centerL], ..., LR[centerR]
 
-Call ``update_envs(new_centerL, new_centerR)`` to shrink the stale window
-(i.e. compute missing environments).  Call ``delete(i)`` to mark LR[i] as
+Call `update_envs(new_centerL, new_centerR)` to shrink the stale window
+(i.e. compute missing environments).  Call `delete(i)` to mark LR[i] as
 stale and expand the stale window.
 
 Observer pattern
 -----------------
 Each subclass registers itself as a callback on the MPS/MPO objects it was
-constructed with.  Whenever a tensor is updated via ``MPS.__setitem__`` or
-``MPO.__setitem__``, ``delete(site)`` is called automatically, keeping the
+constructed with.  Whenever a tensor is updated via `MPS.__setitem__` or
+`MPO.__setitem__`, `delete(site)` is called automatically, keeping the
 stale window accurate without any manual bookkeeping.
 
 The callbacks are stored as *weak references* so that LR objects are garbage
 collected normally when they go out of scope (e.g. when a DMRG function
-returns), without needing an explicit ``unregister`` call.
+returns), without needing an explicit `unregister` call.
 """
 
 from __future__ import annotations
 
-try:
-    import cytnx
-except ImportError as exc:
-    raise ImportError(
-        "cytnx is required for environment.py."
-    ) from exc
+import cytnx
 
 from MPS.uniTensor_utils import any_complex_tensors
 
@@ -55,8 +50,8 @@ from MPS.uniTensor_utils import any_complex_tensors
 class LREnv:
     """Abstract base: stale-window bookkeeping for left/right environment tensors.
 
-    Subclasses must implement ``_grow_left(p, prev_env)`` and
-    ``_grow_right(p, next_env)`` to define the actual tensor contraction.
+    Subclasses must implement `_grow_left(p, prev_env)` and
+    `_grow_right(p, next_env)` to define the actual tensor contraction.
 
     Parameters
     ----------
@@ -67,11 +62,11 @@ class LREnv:
     R0 : cytnx.UniTensor
         Right boundary tensor (stored at index N).
     tensors_to_watch : list
-        MPS/MPO objects whose ``register_callback`` will be called so that
-        ``delete`` fires automatically on tensor updates.
+        MPS/MPO objects whose `register_callback` will be called so that
+        `delete` fires automatically on tensor updates.
     init_center : int
-        Site around which environments are initialised.  After ``__init__``
-        all environments outside ``[init_center, init_center]`` are valid.
+        Site around which environments are initialised.  After `__init__`
+        all environments outside `[init_center, init_center]` are valid.
     """
 
     def __init__(
@@ -112,7 +107,7 @@ class LREnv:
 
         Raises
         ------
-        ValueError  : if ``i`` is out of the valid range [-1, N].
+        ValueError  : if `i` is out of the valid range [-1, N].
         RuntimeError: if LR[i] is inside the stale window.
         AssertionError: if LR[i] is in the valid zone but has not been computed
                         (should not happen in normal usage).
@@ -156,20 +151,20 @@ class LREnv:
     def update_envs(self, centerL: int, centerR: int | None = None) -> None:
         """Compute missing environments to shrink the stale window.
 
-        After this call the stale window becomes ``[centerL, centerR]``.
+        After this call the stale window becomes `[centerL, centerR]`.
         All environments outside this window are guaranteed up-to-date.
 
         The method only computes what is missing:
 
-        * Left  loop: sites ``self.centerL`` → ``centerL - 1`` (growing rightward).
-        * Right loop: sites ``self.centerR`` → ``centerR + 1`` (growing leftward).
+        * Left  loop: sites `self.centerL` → `centerL - 1` (growing rightward).
+        * Right loop: sites `self.centerR` → `centerR + 1` (growing leftward).
 
         Parameters
         ----------
         centerL : int
             Left edge of the new stale window.
         centerR : int, optional
-            Right edge of the new stale window.  Defaults to ``centerL``.
+            Right edge of the new stale window.  Defaults to `centerL`.
 
         Raises
         ------
@@ -241,18 +236,18 @@ class OperatorEnv(LREnv):
     Used to project an operator (e.g. Hamiltonian) into the effective local
     subspace for EffOperator.
 
-    Environment tensor labels: ``["mid", "dn", "up"]``
+    Environment tensor labels: `["mid", "dn", "up"]`
         mid : MPO virtual bond
-        dn  : bra (mps1) virtual bond
-        up  : ket (mps2, conjugated) virtual bond
+        dn  : ket (mps1) virtual bond
+        up  : bra (mps2, Daggered) virtual bond
 
     The boundary tensors L0 / R0 are constructed from the MPS and MPO edge bonds
-    via ``_make_op_boundaries``.
+    via `_make_op_boundaries`.
 
     Parameters
     ----------
-    mps1        : MPS — bra state.
-    mps2        : MPS — ket state (use same object as mps1 for ground-state DMRG).
+    mps1        : MPS — ket state.
+    mps2        : MPS — bra state (use same object as mps1 for ground-state DMRG).
     mpo         : MPO — Hamiltonian.
     init_center : int — initial stale-window center (default 0).
     """
@@ -375,16 +370,16 @@ class VectorEnv(LREnv):
     Used to project a state vector (e.g. a reference MPS) into the effective
     local subspace for EffVector.
 
-    Environment tensor labels: ``["dn", "up"]``
-        dn : bra (mps1) virtual bond
-        up : ket (mps2, conjugated) virtual bond
+    Environment tensor labels: `["dn", "up"]`
+        dn : ket (mps1) virtual bond
+        up : bra (mps2, Daggered) virtual bond
 
     Boundary tensors are constructed automatically from the MPS boundary bonds.
 
     Parameters
     ----------
-    mps1        : MPS — bra state.
-    mps2        : MPS — ket state (the fixed orthogonal reference state).
+    mps1        : MPS — ket state.
+    mps2        : MPS — bra state (the fixed orthogonal reference state).
     init_center : int — initial stale-window center (default 0).
     """
 

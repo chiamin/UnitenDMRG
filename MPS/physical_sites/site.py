@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-try:
-    import cytnx
-except ImportError as exc:
-    raise ImportError("cytnx is required for site.py.") from exc
+import cytnx
 
 from ..mps import MPS
 from ..uniTensor_core import bond_qnums_at, derive_delta_qn

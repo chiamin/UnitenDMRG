@@ -10,7 +10,7 @@ supports the following operations via duck typing:
     v.Norm().item()      : Euclidean norm as a Python float
     v * 0.               : zero vector of the same structure
 
-The inner product is provided by the module-level ``inner`` function, which
+The inner product is provided by the module-level `inner` function, which
 is the only UniTensor-specific operation.
 """
 
@@ -20,10 +20,7 @@ import warnings
 
 import numpy as np
 
-try:
-    import cytnx
-except ImportError as exc:
-    raise ImportError("cytnx is required for linalg.py.") from exc
+import cytnx
 
 
 # ---------------------------------------------------------------------------

@@ -23,12 +23,7 @@ from typing import Iterable, Iterator
 
 import numpy as np
 
-try:
-    import cytnx
-except ImportError as exc:
-    raise ImportError(
-        "cytnx is required for mpo.py. Install/import cytnx first."
-    ) from exc
+import cytnx
 
 from .uniTensor_core import assert_bond_match, svd_by_labels
 from .uniTensor_utils import any_complex_tensors
@@ -104,6 +99,12 @@ class MPO:
                 f"Site {site} must be cytnx.UniTensor; got {type(tensor).__name__}."
             )
         assert_mpo_site_labels(tensor, site)
+        try:
+            assert_bond_match(tensor.bond("i"), tensor.bond("ip"))
+        except ValueError as exc:
+            raise ValueError(
+                f"Site {site}: physical bonds 'i' and 'ip' are inconsistent."
+            ) from exc
         self.tensors[site] = tensor
         live = []
         for obj_ref, method_name in self._callbacks:
@@ -116,8 +117,8 @@ class MPO:
     def register_callback(self, obj, method_name: str = "delete") -> None:
         """Register *obj.method_name* as an Observer callback.
 
-        Identical contract to ``MPS.register_callback``.  The callback fires
-        with the site index whenever a tensor is updated via ``__setitem__``.
+        Identical contract to `MPS.register_callback`.  The callback fires
+        with the site index whenever a tensor is updated via `__setitem__`.
         """
         assert hasattr(obj, method_name), (
             f"{type(obj).__name__} has no method '{method_name}'"
@@ -228,12 +229,13 @@ class MPO:
         Merges site tensors at `bond` and `bond + 1`, SVD-truncates the shared
         virtual bond, and writes the result back.  The row partition used is
         `["l", "ip1", "i1"]` (rowrank-3 semantics), matching the old
-        ``svd_bond_mpo`` convention.
+        `svd_bond_mpo` convention.
 
         Args:
             bond: Bond index to compress (0 to num_sites - 2).
             max_dim: Maximum bond dimension to keep; None means no limit.
-            cutoff: Discard singular values below this threshold.
+            cutoff: Discard Schmidt components whose normalized rho eigenvalue
+                is below this threshold.
             absorb: Which side absorbs the singular values ('left' or 'right').
 
         Returns:
@@ -265,6 +267,6 @@ class MPO:
         right_new.relabels_(["ip2", "i2", "aux"], ["ip", "i", "l"])
 
         kept_dim = left_new.bond("r").dim()
-        self.tensors[bond] = left_new
-        self.tensors[bond + 1] = right_new
+        self[bond] = left_new
+        self[bond + 1] = right_new
         return kept_dim, discarded

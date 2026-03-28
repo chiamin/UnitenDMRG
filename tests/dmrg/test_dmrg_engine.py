@@ -1,4 +1,4 @@
-"""Unit tests for DMRG/dmrg_engine.py.
+"""Unit tests for DMRGEngine.
 
 Coverage
 --------
@@ -23,6 +23,9 @@ Coverage
 5. Excited-state targeting  (TestDMRGExcitedState)
    - First excited energy E1 > E0
    - E1 matches exact diagonalisation (small chain, large bond dim)
+
+6. Complex MPS and MPO  (TestDMRGGroundStateComplex)
+   - 2-site DMRG with complex MPS and complex MPO converges to exact ground state
 """
 
 from __future__ import annotations
@@ -47,6 +50,7 @@ if cytnx is not None:
     from MPS.mps_init import random_mps
     from tests.helpers.heisenberg import heisenberg_mpo
     from DMRG.dmrg_engine import DMRGEngine
+    from MPS.mps_operations import inner
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +293,62 @@ class TestDMRGExcitedState(unittest.TestCase):
         E1 = self._run_sweeps(engine1, n=5, max_dim=32)
 
         self.assertAlmostEqual(E1, self.E1_exact, delta=self.ATOL)
+
+
+# ---------------------------------------------------------------------------
+# 6. Complex MPS and MPO
+# ---------------------------------------------------------------------------
+
+@unittest.skipIf(cytnx is None, "cytnx not available")
+class TestDMRGGroundStateComplex(unittest.TestCase):
+    """DMRG with complex MPS and complex MPO.
+
+    The Heisenberg Hamiltonian is real and Hermitian, so the ground-state
+    energy must be the same regardless of whether the MPS/MPO dtype is real
+    or complex.  If any bra-side conjugation is missing inside the sweep,
+    the energy will differ from the exact value.
+    """
+
+    N    = 6
+    ATOL = 1e-5
+
+    @classmethod
+    def setUpClass(cls):
+        cls.E0_exact = _exact_energies(cls.N, num=1)[0]
+
+    def test_2site_complex_ground_state_energy(self):
+        """2-site DMRG with complex dtype converges to the exact ground-state energy."""
+        psi = random_mps(self.N, phys_dim=2, bond_dim=4,
+                         dtype=complex, seed=100)
+        psi.move_center(0)
+        engine = DMRGEngine(psi, heisenberg_mpo(self.N, dtype=complex))
+        E = None
+        for max_dim in [10, 20, 20]:
+            E, _ = engine.sweep(max_dim=max_dim, cutoff=1e-10, num_center=2)
+        self.assertAlmostEqual(E, self.E0_exact, delta=self.ATOL)
+
+    def test_complex_ground_state_overlap_with_real(self):
+        """Complex-dtype DMRG ground state has near-unit overlap with real-dtype result.
+
+        Both runs optimise the same Hamiltonian from the same initial state
+        (seeds match).  The converged states should be equivalent up to a
+        global phase, so |<psi_complex|psi_real>| ≈ 1.
+        """
+        psi_real = random_mps(self.N, phys_dim=2, bond_dim=4, seed=101)
+        psi_real.move_center(0)
+        engine_real = DMRGEngine(psi_real, heisenberg_mpo(self.N))
+        for max_dim in [10, 20, 20]:
+            engine_real.sweep(max_dim=max_dim, cutoff=1e-10, num_center=2)
+
+        psi_cplx = random_mps(self.N, phys_dim=2, bond_dim=4,
+                              dtype=complex, seed=101)
+        psi_cplx.move_center(0)
+        engine_cplx = DMRGEngine(psi_cplx, heisenberg_mpo(self.N, dtype=complex))
+        for max_dim in [10, 20, 20]:
+            engine_cplx.sweep(max_dim=max_dim, cutoff=1e-10, num_center=2)
+
+        overlap = abs(complex(inner(psi_real, psi_cplx)))
+        self.assertAlmostEqual(overlap, 1.0, delta=1e-4)
 
 
 if __name__ == "__main__":

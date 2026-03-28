@@ -27,10 +27,7 @@ VectorEnv.update_envs before constructing these objects.
 
 from __future__ import annotations
 
-try:
-    import cytnx
-except ImportError as exc:
-    raise ImportError("cytnx is required for effective_operators.py.") from exc
+import cytnx
 
 from MPS.mps import MPS
 
@@ -42,33 +39,33 @@ from MPS.mps import MPS
 class EffVector:
     """Effective vector  ⟨φ| projected into the local subspace.
 
-    ``EffVector`` represents a reference MPS |φ⟩ projected into the same
+    `EffVector` represents a reference MPS |φ⟩ projected into the same
     local subspace as the optimisation variable φ.  The projected vector
-    |Φ_0⟩ is pre-computed in ``__init__`` by contracting the left/right
+    |Φ_0⟩ is pre-computed in `__init__` by contracting the left/right
     overlap environments with the reference site tensors.
 
     Parameters
     ----------
     L : UniTensor
-        Left overlap environment, labels ``["dn", "up"]``.
-        Typically ``VectorEnv[p-1]``.
+        Left overlap environment, labels `["dn", "up"]`.
+        Typically `VectorEnv[p-1]`.
     R : UniTensor
-        Right overlap environment, labels ``["dn", "up"]``.
-        Typically ``VectorEnv[p+n]`` where n = number of sites.
+        Right overlap environment, labels `["dn", "up"]`.
+        Typically `VectorEnv[p+n]` where n = number of sites.
     *mps_tensors : UniTensor
         Site tensors of the reference state |φ⟩, in site order.
-        Labels ``["l", "i", "r"]``.  Typically 1 or 2 tensors.
+        Labels `["l", "i", "r"]`.  Typically 1 or 2 tensors.
 
     Notes
     -----
     The contraction order is sequential left-to-right:
     L × A[0] × A[1] × … × R → |Φ_0⟩
 
-    ``|Φ_0⟩`` has the same labels as the optimisation variable φ produced by
-    ``EffOperator.make_phi``: ``["l", "i0", "i1", …, "r"]``.
+    `|Φ_0⟩` has the same labels as the optimisation variable φ produced by
+    `EffOperator.make_phi`: `["l", "i0", "i1", …, "r"]`.
 
-    ``inner(phi)`` then computes ⟨Φ_0|φ⟩ as a direct contraction (no Dagger
-    needed because the bond directions in L/R already handle bra/ket).
+    `inner(phi)` computes ⟨Φ_0|φ⟩ via `Contract(self.tensor.Dagger(), phi)`,
+    which correctly complex-conjugates the reference state elements.
     """
 
     def __init__(self, L: "cytnx.UniTensor", R: "cytnx.UniTensor",
@@ -86,15 +83,16 @@ class EffVector:
         -----
         Diagram (2-site example):
 
-          |Φ_0⟩:   l ─── i0 ─── i1 ─── r
-          φ    :   l ─── i0 ─── i1 ─── r
+          ⟨Φ_0|:   l ─── i0 ─── i1 ─── r   (bra: Dagger applied)
+          φ    :   l ─── i0 ─── i1 ─── r   (ket)
 
           Contract all matching labels → scalar.
 
-        The bond directions set by VectorEnv already encode the bra side, so
-        no explicit Dagger() is needed here.
+        `self.tensor.Dagger()` complex-conjugates the reference state
+        elements, giving the correct Hermitian inner product for both real
+        and complex reference states.
         """
-        return cytnx.Contract(self.tensor, phi).item()
+        return cytnx.Contract(self.tensor.Dagger(), phi).item()
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -151,13 +149,13 @@ class EffOperator:
     Parameters
     ----------
     L : UniTensor
-        Left operator environment, labels ``["mid", "dn", "up"]``.
-        Typically ``OperatorEnv[p-1]``.
+        Left operator environment, labels `["mid", "dn", "up"]`.
+        Typically `OperatorEnv[p-1]`.
     R : UniTensor
-        Right operator environment, labels ``["mid", "dn", "up"]``.
-        Typically ``OperatorEnv[p+n]`` where n = number of sites.
+        Right operator environment, labels `["mid", "dn", "up"]`.
+        Typically `OperatorEnv[p+n]` where n = number of sites.
     *mpo_tensors : UniTensor
-        MPO site tensors in site order, labels ``["l", "ip", "i", "r"]``.
+        MPO site tensors in site order, labels `["l", "ip", "i", "r"]`.
         0 tensors → 0-site (bond-only), 1 → single-site, 2 → two-site DMRG.
     """
 
@@ -182,7 +180,7 @@ class EffOperator:
         Parameters
         ----------
         phi : UniTensor
-            The optimisation variable.  Must have labels ``"l"`` and ``"r"``
+            The optimisation variable.  Must have labels `"l"` and `"r"`
             for the virtual bonds; all other labels are treated as physical
             indices (in MPO site order).
 
@@ -206,9 +204,9 @@ class EffOperator:
     def add_term(self, eff_vec: "EffVector", weight: complex) -> None:
         """Add a weighted rank-1 term  w |Φ_0⟩⟨Φ_0|  to H_eff.
 
-        Typical use: excited-state targeting in DMRG, where ``weight`` is a
+        Typical use: excited-state targeting in DMRG, where `weight` is a
         positive energy penalty that pushes the optimisation away from a
-        previously found eigenstate.  A negative ``weight`` would instead
+        previously found eigenstate.  A negative `weight` would instead
         *attract* the solution toward |Φ_0⟩.
 
         Parameters

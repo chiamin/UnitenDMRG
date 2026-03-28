@@ -55,10 +55,7 @@ from typing import Any
 
 import numpy as np
 
-try:
-    import cytnx
-except ImportError as exc:
-    raise ImportError("cytnx is required for auto_mpo.py.") from exc
+import cytnx
 
 from .mpo import MPO
 from .physical_sites.site import PhysicalSite

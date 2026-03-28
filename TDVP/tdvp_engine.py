@@ -22,10 +22,7 @@ Usage
 
 from __future__ import annotations
 
-try:
-    import cytnx
-except ImportError as exc:
-    raise ImportError("cytnx is required for tdvp_engine.py.") from exc
+import cytnx
 
 from MPS.mps import MPS
 from MPS.linalg import lanczos_expm_multiply
@@ -70,7 +67,8 @@ class TDVPEngine:
         ----------
         dt         : complex — time step (see module docstring for convention).
         max_dim    : int | None — max bond dimension (2-site only).
-        cutoff     : float — SVD cutoff (2-site only).
+        cutoff     : float — cutoff on normalized rho eigenvalues during
+                     2-site splits.
         num_center : 1 or 2 — 1-site (fixed bond dim) or 2-site (can grow).
 
         Returns

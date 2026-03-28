@@ -86,9 +86,16 @@ def svd_by_labels(
             In the `None` case, the bond between `left` and `s` is labelled
             `aux_label`, and the bond between `s` and `right` is labelled
             `aux_label + "_r"` (e.g. `"aux"` and `"aux_r"` by default).
+        cutoff: Truncation threshold on normalized rho eigenvalues
+            `lambda_i = |s_i|^2 / sum_j |s_j|^2`.
+            Singular values with `lambda_i < cutoff` are discarded.
+            At least one singular value is always kept (cytnx guarantee).
+            `cutoff=0` is allowed.
     """
     if absorb not in {"left", "right", None}:
         raise ValueError("absorb must be 'left', 'right', or None.")
+    if cutoff < 0.0:
+        raise ValueError(f"cutoff must be >= 0; got {cutoff}.")
 
     row_labels, col_labels = _split_row_col_labels(
         tensor, row_labels=row_labels, col_labels=col_labels
@@ -98,10 +105,19 @@ def svd_by_labels(
     ordered.set_rowrank_(len(row_labels))
 
     total_sq = float(ordered.Norm().item()) ** 2
+    if total_sq == 0.0:
+        raise ValueError(
+            "All singular values are zero; cannot normalize rho eigenvalues for truncation."
+        )
 
-    s, left, right = cytnx.linalg.Svd_truncate(ordered, keepdim=dim, err=cutoff)
+    # Convert rho-eigenvalue cutoff to a singular-value threshold:
+    # lambda_i = |s_i|^2 / total_sq >= cutoff  <=>  |s_i| >= sqrt(cutoff * total_sq)
+    # cytnx.Svd_truncate always keeps >= 1 singular value even if all fall below err.
+    sv_cutoff = float(np.sqrt(cutoff * total_sq))
+    s, left, right = cytnx.linalg.Svd_truncate(ordered, keepdim=dim, err=sv_cutoff)
     kept_sq = _kept_weight(s)
-    discarded = max(0.0, total_sq - kept_sq)
+    # Return discarded weight in normalized-rho units.
+    discarded = max(0.0, 1.0 - kept_sq / total_sq)
 
     # SVD convention: aux bond of u is its last index; aux bond of vt is its first index.
     aux_in_left = left.labels()[-1]
@@ -142,15 +158,98 @@ def scalar_from_uniTensor(u: "cytnx.UniTensor") -> float | complex:
 
 
 def assert_bond_match(b1: "cytnx.Bond", b2: "cytnx.Bond") -> None:
-    """Validate two cytnx bonds are equivalent up to direction."""
+    """Validate two cytnx bonds have identical content (dim, symmetry, qnums, degeneracies).
+
+    Direction (BD_IN / BD_OUT) is intentionally not checked so the function
+    can be used for both virtual-bond and physical-bond comparisons.
+    """
     if b1.dim() != b2.dim():
         raise ValueError("Bond dimensions mismatch.")
-    if b1.type() != b2.redirect().type():
-        raise ValueError("Bond types mismatch.")
+    if b1.Nsym() != b2.Nsym():
+        raise ValueError("Bond symmetry count mismatch.")
     if b1.qnums() != b2.qnums():
         raise ValueError("Bond qnums mismatch.")
     if b1.getDegeneracies() != b2.getDegeneracies():
         raise ValueError("Bond degeneracies mismatch.")
+
+
+def _make_expand(
+    bond1: "cytnx.Bond",
+    bond2: "cytnx.Bond",
+    label1: str,
+    label2: str,
+    re_label: str,
+) -> tuple["cytnx.UniTensor", "cytnx.UniTensor"]:
+    """Build embedding matrices for the direct sum of bond1 and bond2.
+
+    bond_sum = bond1's sectors || bond2's sectors.
+    Returns (exp1, exp2):
+      exp1: embeds bond1 into bond_sum — identity block at (k, k)
+      exp2: embeds bond2 into bond_sum — identity block at (k, k + nsec1)
+    exp1 has labels [label1, re_label]; exp2 has labels [label2, re_label].
+    """
+    qnums    = list(bond1.qnums()) + list(bond2.qnums())
+    degs     = list(bond1.getDegeneracies()) + list(bond2.getDegeneracies())
+    bond_sum = cytnx.Bond(bond1.type(), qnums, degs, list(bond1.syms()))
+    nsec1    = len(bond1.qnums())
+
+    exp1 = cytnx.UniTensor([bond1.redirect(), bond_sum], labels=[label1, re_label], rowrank=1)
+    for k, d in enumerate(bond1.getDegeneracies()):
+        exp1.put_block_(cytnx.eye(d), [label1, re_label], [k, k])
+
+    exp2 = cytnx.UniTensor([bond2.redirect(), bond_sum], labels=[label2, re_label], rowrank=1)
+    for k, d in enumerate(bond2.getDegeneracies()):
+        exp2.put_block_(cytnx.eye(d), [label2, re_label], [k, k + nsec1])
+
+    return exp1, exp2
+
+
+def direct_sum(
+    A: "cytnx.UniTensor",
+    B: "cytnx.UniTensor",
+    sum_labels_A: list[str],
+    sum_labels_B: list[str],
+    re_labels: list[str],
+) -> "cytnx.UniTensor":
+    """Compute C = A ⊕ B, direct-summing along bond pairs (sum_labels_A[k], sum_labels_B[k]).
+
+    The enlarged bond for each pair is named re_labels[k].
+    All non-summed labels must be identical between A and B with matching bonds.
+    re_labels must not clash with any non-summed label.
+    """
+    if not len(sum_labels_A) == len(sum_labels_B) == len(re_labels):
+        raise ValueError(
+            f"sum_labels_A, sum_labels_B, re_labels must have equal length; "
+            f"got {len(sum_labels_A)}, {len(sum_labels_B)}, {len(re_labels)}."
+        )
+
+    non_sum_A = [l for l in A.labels() if l not in sum_labels_A]
+    non_sum_B = [l for l in B.labels() if l not in sum_labels_B]
+    if set(non_sum_A) != set(non_sum_B):
+        raise ValueError(
+            f"Non-summed labels mismatch: A has {non_sum_A}, B has {non_sum_B}."
+        )
+    for lab in non_sum_A:
+        assert_bond_match(A.bond(lab), B.bond(lab))
+    for re in re_labels:
+        if re in non_sum_A:
+            raise ValueError(
+                f"re_label '{re}' clashes with non-summed label '{re}'."
+            )
+
+    TA, TB = A, B
+    for lA, lB, re in zip(sum_labels_A, sum_labels_B, re_labels):
+        tmp = f"__ds_{re}__"   # avoids clash when re == lA or lB
+        exp1, exp2 = _make_expand(TA.bond(lA), TB.bond(lB), lA, lB, tmp)
+        TA = cytnx.Contract(exp1, TA)
+        TB = cytnx.Contract(exp2, TB)
+        TA.relabel_(tmp, re)
+        TB.relabel_(tmp, re)
+
+    labels = list(TA.labels())
+    C = TA + TB
+    C.set_labels(labels)
+    return C
 
 
 def _bond_sector_at(bond: "cytnx.Bond", idx: int) -> tuple[int, int]:

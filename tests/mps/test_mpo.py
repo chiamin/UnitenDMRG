@@ -1,7 +1,7 @@
-"""Unit tests for MPO module.
+"""Unit tests for the MPO module.
 
 Coverage:
-- `mpo.py`: MPO API, label validation, bond checks, endpoint dim=1 enforcement, compression
+- MPO: API, label validation, bond checks, endpoint dim=1 enforcement, compression
 
 Tests are skipped automatically if `cytnx` is unavailable.
 """
@@ -134,7 +134,7 @@ class TestMPOValidateBonds(unittest.TestCase):
         mpo._validate_bonds()  # should not raise
 
     def test_physical_bond_mismatch_raises(self) -> None:
-        # Build a site where 'i' and 'ip' have different dims.
+        # Build a site where "i" and "ip" have different dims.
         arr = np.ones((3, 2, 3, 3), dtype=float)  # ip=2, i=3 → mismatch
         u = cytnx.UniTensor(cytnx.from_numpy(arr), rowrank=2)
         u.set_labels(["l", "ip", "i", "r"])
@@ -184,8 +184,8 @@ class TestMPOProperties(unittest.TestCase):
         mpo = _make_mpo(num_sites=3, d=2, D=3)
         dims = mpo.mpo_dims
         self.assertEqual(len(dims), 4)       # num_sites + 1
-        self.assertEqual(dims[0], 1)          # bond('l') of site 0 must be dim=1
-        self.assertEqual(dims[-1], 1)         # bond('r') of last site must be dim=1
+        self.assertEqual(dims[0], 1)          # bond("l") of site 0 must be dim=1
+        self.assertEqual(dims[-1], 1)         # bond("r") of last site must be dim=1
         self.assertEqual(dims[1], 3)          # bulk bond dim = D
 
     def test_copy_tensors_are_independent(self) -> None:

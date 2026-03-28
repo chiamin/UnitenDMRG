@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-try:
-    import cytnx
-except ImportError as exc:
-    raise ImportError("cytnx is required for spin_half.py.") from exc
+import cytnx
 
 from .site import PhysicalSite
 from ..uniTensor_core import derive_delta_qn

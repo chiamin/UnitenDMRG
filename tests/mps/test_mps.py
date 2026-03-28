@@ -1,9 +1,9 @@
-"""Unit tests for UniTensor-based MPS modules.
+"""Unit tests for the MPS module.
 
 Coverage:
-- `mps_uniTensor.py`: MPS API and invariants
-- `uniTensor_core.py`: core decomposition/compression kernels
-- `uniTensor_utils.py`: conversion and debug helpers
+- MPS: API and invariants
+- uniTensor_core: core decomposition/compression kernels
+- uniTensor_utils: conversion and debug helpers
 
 Tests are skipped automatically if `cytnx` is unavailable.
 """
@@ -30,13 +30,15 @@ if cytnx is not None:
     from MPS.mps import (
         MPS,
         assert_mps_site_uniTensor_labels,
-        compress_bond_tensors,
-        svd_bond,
     )
+    from MPS.auto_mpo import AutoMPO
     from MPS.mps_init import random_mps
+    from MPS.mps_operations import expectation, inner, mpo_sum, mps_sum
     from MPS.physical_sites import PhysicalSite
+    from MPS.physical_sites.spin_half import spin_half
     from MPS.uniTensor_core import (
         assert_bond_match,
+        direct_sum,
         qr_by_labels,
         scalar_from_uniTensor,
         svd_by_labels,
@@ -50,11 +52,16 @@ else:  # pragma: no cover
         raise RuntimeError("cytnx is required")
 
     assert_mps_site_uniTensor_labels = _missing_cytnx
-    compress_bond_tensors = _missing_cytnx
-    svd_bond = _missing_cytnx
+    AutoMPO = _missing_cytnx
+    expectation = _missing_cytnx
+    mps_sum = _missing_cytnx
+    mpo_sum = _missing_cytnx
     random_mps = _missing_cytnx
     PhysicalSite = _missing_cytnx
+    spin_half = _missing_cytnx
+    expectation = _missing_cytnx
     assert_bond_match = _missing_cytnx
+    direct_sum = _missing_cytnx
     qr_by_labels = _missing_cytnx
     scalar_from_uniTensor = _missing_cytnx
     svd_by_labels = _missing_cytnx
@@ -148,6 +155,7 @@ class TestUniTensorCore(unittest.TestCase):
         self.assertIsInstance(a1, cytnx.UniTensor)
         self.assertIsInstance(a2, cytnx.UniTensor)
         self.assertGreaterEqual(dw, 0.0)
+        self.assertLessEqual(dw, 1.0)
         self.assertEqual(a1.labels(), ["0", "1", "x"])
         self.assertEqual(a2.labels(), ["x", "2", "3"])
         rebuilt = cytnx.Contract(a1, a2)
@@ -168,6 +176,7 @@ class TestUniTensorCore(unittest.TestCase):
         self.assertIsInstance(a1, cytnx.UniTensor)
         self.assertIsInstance(a2, cytnx.UniTensor)
         self.assertGreaterEqual(dw, 0.0)
+        self.assertLessEqual(dw, 1.0)
         self.assertEqual(a1.labels(), ["0", "1", "x"])
         self.assertEqual(a2.labels(), ["x", "2", "3"])
         rebuilt = cytnx.Contract(a1, a2)
@@ -179,6 +188,20 @@ class TestUniTensorCore(unittest.TestCase):
         t = cytnx.UniTensor(cytnx.from_numpy(arr), rowrank=2)
         with self.assertRaises(ValueError):
             svd_by_labels(t, row_labels=["0", "1"], absorb="both")
+
+    def test_svd_by_labels_negative_cutoff_raises(self) -> None:
+        """svd_by_labels should reject cutoff < 0."""
+        arr = np.arange(2 * 3 * 2 * 2, dtype=float).reshape(2, 3, 2, 2)
+        t = cytnx.UniTensor(cytnx.from_numpy(arr), rowrank=2)
+        with self.assertRaises(ValueError):
+            svd_by_labels(t, row_labels=["0", "1"], absorb="right", cutoff=-1e-12)
+
+    def test_svd_by_labels_zero_tensor_raises(self) -> None:
+        """svd_by_labels should raise when all singular values are zero."""
+        arr = np.zeros((2, 3, 2, 2), dtype=float)
+        t = cytnx.UniTensor(cytnx.from_numpy(arr), rowrank=2)
+        with self.assertRaises(ValueError):
+            svd_by_labels(t, row_labels=["0", "1"], absorb="right", cutoff=0.0)
 
     def test_split_row_col_labels_errors(self) -> None:
         """_split_row_col_labels error paths should propagate through svd_by_labels."""
@@ -217,55 +240,167 @@ class TestUniTensorCore(unittest.TestCase):
         rebuilt = cytnx.Contract(q, r)
         np.testing.assert_allclose(to_numpy_array(rebuilt), to_numpy_array(tensor))
 
-    def test_svd_bond_absorb_sides(self) -> None:
-        """svd_bond should keep MPS labels/connectivity for both absorb sides."""
-        mps = _make_mps()
-        left, right = mps[0], mps[1]
-        ln, rn, dw = svd_bond(left, right, absorb="left", dim=sys.maxsize, cutoff=0.0)
-        self.assertEqual(set(ln.labels()), {"l", "i", "r"})
-        self.assertEqual(set(rn.labels()), {"l", "i", "r"})
-        self.assertGreaterEqual(dw, 0.0)
-        self.assertEqual(ln.bond("r").dim(), rn.bond("l").dim())
 
-        ln2, rn2, dw2 = svd_bond(left, right, absorb="right", dim=sys.maxsize, cutoff=0.0)
-        self.assertEqual(ln2.bond("r").dim(), rn2.bond("l").dim())
-        self.assertGreaterEqual(dw2, 0.0)
+@unittest.skipIf(cytnx is None, "cytnx is required for UniTensor tests")
+class TestDirectSum(unittest.TestCase):
+    """Tests for direct_sum of QN UniTensors."""
 
-    def test_compress_bond_tensors(self) -> None:
-        """compress_bond_tensors should enforce max_dim and return truncation info."""
-        mps = _make_mps()
-        left, right = mps[0], mps[1]
-        ln, rn, kept, dw = compress_bond_tensors(
-            left, right, absorb="right", max_dim=2, cutoff=0.0
+    def setUp(self):
+        self.sym = [cytnx.Symmetry.U1()]
+
+    def _make_rank2(self, i_degs, j_degs=None):
+        """Rank-2 UniTensor with labels ["i","j"], rowrank=1."""
+        sym = self.sym
+        b_i = cytnx.Bond(cytnx.BD_IN,  [[0], [1]], i_degs, sym)
+        b_j = cytnx.Bond(cytnx.BD_OUT, [[0], [1]], j_degs or [1, 1], sym)
+        t = cytnx.UniTensor([b_i, b_j], labels=["i", "j"], rowrank=1)
+        cytnx.random.uniform_(t, 0., 1.)
+        return t
+
+    def _make_rank4_mpo(self, l_degs, r_degs):
+        """Rank-4 MPO-like UniTensor with labels ["l","ip","i","r"], rowrank=2."""
+        sym = self.sym
+        b_l  = cytnx.Bond(cytnx.BD_IN,  [[0], [1]], l_degs, sym)
+        b_ip = cytnx.Bond(cytnx.BD_IN,  [[0], [1]], [1, 1], sym)
+        b_i  = cytnx.Bond(cytnx.BD_OUT, [[0], [1]], [1, 1], sym)
+        b_r  = cytnx.Bond(cytnx.BD_OUT, [[0], [1]], r_degs, sym)
+        t = cytnx.UniTensor([b_l, b_ip, b_i, b_r], labels=["l", "ip", "i", "r"], rowrank=2)
+        cytnx.random.uniform_(t, 0., 1.)
+        return t
+
+    def test_rank2_inner_product(self):
+        """<A⊕B | C⊕D> == <A|C> + <B|D> for rank-2 single-bond direct sum."""
+        A = self._make_rank2([2, 3])
+        B = self._make_rank2([1, 2])
+        C = self._make_rank2([2, 3])
+        D = self._make_rank2([1, 2])
+
+        AB = direct_sum(A, B, ["i"], ["i"], ["i"])
+        CD = direct_sum(C, D, ["i"], ["i"], ["i"])
+
+        inner_AB_CD = cytnx.Contract(AB.Dagger(), CD).item()
+        inner_AC    = cytnx.Contract(A.Dagger(), C).item()
+        inner_BD    = cytnx.Contract(B.Dagger(), D).item()
+        self.assertAlmostEqual(inner_AB_CD, inner_AC + inner_BD, places=10)
+
+    def test_rank4_mpo_norm(self):
+        """‖A⊕B‖² == ‖A‖² + ‖B‖² for rank-4 MPO-like two-bond direct sum."""
+        mA = self._make_rank4_mpo(l_degs=[2, 1], r_degs=[1, 2])
+        mB = self._make_rank4_mpo(l_degs=[1, 3], r_degs=[2, 1])
+
+        mAB = direct_sum(mA, mB, ["l", "r"], ["l", "r"], ["l", "r"])
+
+        norm_AB_sq = mAB.Norm().item() ** 2
+        norm_A_sq  = mA.Norm().item() ** 2
+        norm_B_sq  = mB.Norm().item() ** 2
+        self.assertAlmostEqual(norm_AB_sq, norm_A_sq + norm_B_sq, places=10)
+
+    def test_re_label_renamed(self):
+        """Output bond carries the name given in re_labels, even when it differs from sum_labels."""
+        A = self._make_rank2([2, 3])
+        B = self._make_rank2([1, 2])
+
+        AB = direct_sum(A, B, ["i"], ["i"], ["new_i"])
+        self.assertIn("new_i", list(AB.labels()))
+        self.assertNotIn("i", list(AB.labels()))
+
+    def test_error_length_mismatch(self):
+        """Mismatched list lengths should raise ValueError."""
+        A = self._make_rank2([2, 3])
+        B = self._make_rank2([1, 2])
+        with self.assertRaises(ValueError):
+            direct_sum(A, B, ["i"], ["i"], ["i", "extra"])
+
+    def test_error_non_sum_label_mismatch(self):
+        """A and B having different non-sum labels should raise ValueError."""
+        sym = self.sym
+        b_i = cytnx.Bond(cytnx.BD_IN,  [[0], [1]], [2, 3], sym)
+        b_jA = cytnx.Bond(cytnx.BD_OUT, [[0], [1]], [1, 1], sym)
+        b_jB = cytnx.Bond(cytnx.BD_OUT, [[0], [1]], [1, 1], sym)
+        A = cytnx.UniTensor([b_i, b_jA], labels=["i", "j"], rowrank=1)
+        B = cytnx.UniTensor([b_i, b_jB], labels=["i", "k"], rowrank=1)  # "k" != "j"
+        with self.assertRaises(ValueError):
+            direct_sum(A, B, ["i"], ["i"], ["i"])
+
+    def test_error_non_sum_bond_mismatch(self):
+        """Same non-sum label but incompatible bond content should raise ValueError."""
+        sym = self.sym
+        b_iA = cytnx.Bond(cytnx.BD_IN,  [[0], [1]], [2, 3], sym)
+        b_iB = cytnx.Bond(cytnx.BD_IN,  [[0], [1]], [1, 2], sym)
+        b_j1 = cytnx.Bond(cytnx.BD_OUT, [[0], [1]], [1, 1], sym)
+        b_j2 = cytnx.Bond(cytnx.BD_OUT, [[0], [1]], [2, 1], sym)  # different degs
+        A = cytnx.UniTensor([b_iA, b_j1], labels=["i", "j"], rowrank=1)
+        B = cytnx.UniTensor([b_iB, b_j2], labels=["i", "j"], rowrank=1)
+        with self.assertRaises(ValueError):
+            direct_sum(A, B, ["i"], ["i"], ["i"])
+
+    def test_error_re_label_clashes_non_sum(self):
+        """re_label equal to a non-summed label should raise ValueError."""
+        A = self._make_rank2([2, 3])
+        B = self._make_rank2([1, 2])
+        with self.assertRaises(ValueError):
+            direct_sum(A, B, ["i"], ["i"], ["j"])  # "j" is a non-sum label
+
+
+@unittest.skipIf(cytnx is None, "cytnx is required for UniTensor tests")
+class TestMPSSum(unittest.TestCase):
+    """Tests for mps_sum."""
+
+    def test_inner_product_factorizes(self):
+        """inner(sum(α,β), sum(φ,χ)) == inner(α,φ) + inner(β,χ)."""
+        site = spin_half(qn="Sz")
+        alpha = site.product_state([1, 0, 1, 0])
+        phi   = site.product_state([1, 0, 1, 0])
+        beta  = site.product_state([0, 1, 0, 1])
+        chi   = site.product_state([0, 1, 0, 1])
+
+        sumAB = mps_sum(alpha, beta)
+        sumPC = mps_sum(phi, chi)
+
+        self.assertAlmostEqual(
+            inner(sumAB, sumPC),
+            inner(alpha, phi) + inner(beta, chi),
+            places=10,
         )
-        self.assertEqual(ln.bond("r").dim(), rn.bond("l").dim())
-        self.assertEqual(kept, ln.bond("r").dim())
-        self.assertLessEqual(kept, 2)
-        self.assertGreaterEqual(dw, 0.0)
 
-    def test_compress_bond_on_mps(self) -> None:
-        """compress_bond should update center and keep bond dimension under cap."""
-        mps = _make_mps()
-        kept, dw = mps.compress_bond(0, max_dim=2, cutoff=0.0, absorb="right")
-        self.assertLessEqual(kept, 2)
-        self.assertEqual(mps.center, 1)
-        self.assertGreaterEqual(dw, 0.0)
+    def test_bond_dims(self):
+        """Virtual bond dims of mps_sum equal the sum of the two MPS bond dims."""
+        site = spin_half(qn="Sz")
+        psi = site.product_state([1, 0, 1, 0])
+        phi = site.product_state([0, 1, 0, 1])
+        result = mps_sum(psi, phi)
+        for k in range(len(psi) - 1):
+            expected = psi[k].bond("r").dim() + phi[k].bond("r").dim()
+            self.assertEqual(result[k].bond("r").dim(), expected)
 
-    def test_compress_bond_error_cases(self) -> None:
-        """compress_bond should raise on invalid bond index or absorb value."""
-        mps = _make_mps()
-        with self.assertRaises(IndexError):
-            mps.compress_bond(-1, max_dim=2, absorb="right")
-        with self.assertRaises(IndexError):
-            mps.compress_bond(len(mps) - 1, max_dim=2, absorb="right")
-        with self.assertRaises(ValueError):
-            mps.compress_bond(0, max_dim=2, absorb="both")
 
-    def test_compress_bond_tensors_error_on_zero_max_dim(self) -> None:
-        """compress_bond_tensors should raise ValueError for max_dim <= 0."""
-        mps = _make_mps()
-        with self.assertRaises(ValueError):
-            compress_bond_tensors(mps[0], mps[1], absorb="right", max_dim=0, cutoff=0.0)
+@unittest.skipIf(cytnx is None, "cytnx is required for UniTensor tests")
+class TestMPOSum(unittest.TestCase):
+    """Tests for mpo_sum."""
+
+    def test_expectation_factorizes(self):
+        """expectation(ψ, mpo_sum(H1, H2), ψ) == expectation(ψ, H1, ψ) + expectation(ψ, H2, ψ)."""
+        site = spin_half(qn="Sz")
+        N = 4
+        J = 1.0
+
+        ampo_ising = AutoMPO(N, site)
+        ampo_xy    = AutoMPO(N, site)
+        for i in range(N - 1):
+            ampo_ising.add(J,       "Sz", i, "Sz", i + 1)
+            ampo_xy.add(J / 2, "Sp", i, "Sm", i + 1)
+            ampo_xy.add(J / 2, "Sm", i, "Sp", i + 1)
+        H_ising = ampo_ising.to_mpo()
+        H_xy    = ampo_xy.to_mpo()
+        H_sum   = mpo_sum(H_ising, H_xy)
+
+        psi = site.product_state([1, 0, 1, 0])
+
+        self.assertAlmostEqual(
+            expectation(psi, H_sum, psi),
+            expectation(psi, H_ising, psi) + expectation(psi, H_xy, psi),
+            places=10,
+        )
 
 
 @unittest.skipIf(cytnx is None, "cytnx is required for UniTensor tests")
@@ -325,7 +460,7 @@ class TestMPS(unittest.TestCase):
         mps = _make_mps()
         mps_copy = mps.copy()
         self.assertIsNot(mps_copy[0], mps[0])
-        val = mps.inner(mps_copy)
+        val = inner(mps, mps_copy)
         self.assertTrue(np.isfinite(float(np.real(val))))
         n0 = mps.norm()
         self.assertGreater(n0, 0.0)
@@ -435,11 +570,11 @@ class TestMPS(unittest.TestCase):
         self.assertTrue(mps.is_complex)
 
     def test_inner_complex_mps_does_not_mismatch_env_dtype(self) -> None:
-        """inner(self) on complex MPS should run without real/complex env mismatch."""
+        """inner on complex MPS should run without real/complex env mismatch."""
         mps = random_mps(
             num_sites=3, phys_dim=2, bond_dim=3, dtype=complex, normalize=False, seed=5
         )
-        val = mps.inner(mps)
+        val = inner(mps, mps)
         self.assertTrue(np.isfinite(float(np.real(val))))
 
     def test_factory_random_mps_seed_reproducibility(self) -> None:

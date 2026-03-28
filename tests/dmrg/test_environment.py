@@ -1,4 +1,4 @@
-"""Unit tests for MPS/dmrg/environment.py.
+"""Unit tests for the DMRG environment module.
 
 Coverage
 --------
@@ -49,7 +49,7 @@ Coverage
    - When VectorEnv is garbage-collected, dead callback pruned from MPS
 
 9. VectorEnv mathematical correctness  (TestLRMPSMath)
-   - Full left sweep gives <mps1|mps2> matching mps1.inner(mps2)
+   - Full left sweep gives <mps1|mps2> matching inner(mps1, mps2)
    - Overlap with itself gives 1.0 for a normalised MPS
 """
 
@@ -76,6 +76,7 @@ if cytnx is not None:
     from MPS.mps import MPS
     from MPS.mpo import MPO
     from MPS.mps_init import random_mps
+    from MPS.mps_operations import inner
     from MPS.uniTensor_utils import to_numpy_array
     from DMRG.environment import (
         OperatorEnv,
@@ -615,6 +616,22 @@ class TestLRMPOMath(unittest.TestCase):
         self.assertAlmostEqual(val, expected, places=9,
                                msg="Manual two-site contraction should give ||psi||^2")
 
+    def test_complex_hermitian_mpo_gives_real_expectation(self):
+        """<psi|H|psi> via OperatorEnv is real and positive for complex MPS and Hermitian H.
+
+        Uses identity MPO (trivially Hermitian).  If the bra side were not
+        conjugated, the imaginary parts of psi would not cancel and imag != 0.
+        """
+        N, d, D = 4, 2, 3
+        mps = random_mps(N, d, D, dtype=complex, seed=80, normalize=True)
+        mpo = _make_identity_mpo(N, d)
+        lr = self._full_left_sweep(mps, mpo)
+        env = lr[N - 1]
+        arr = to_numpy_array(env)
+        val = complex(arr.flat[0])
+        self.assertAlmostEqual(val.imag, 0.0, places=10)
+        self.assertGreater(val.real, 0.0)
+
 
 # ===========================================================================
 # 7. VectorEnv initialisation
@@ -770,14 +787,14 @@ class TestLRMPSMath(unittest.TestCase):
         self.assertAlmostEqual(val.imag, 0.0, places=10)
 
     def test_overlap_matches_mps_inner(self):
-        """<psi1|psi2> via VectorEnv matches MPS.inner()."""
+        """<psi1|psi2> via VectorEnv matches inner()."""
         N, d, D = 4, 2, 3
         mps1 = _make_random_mps(N, d, D, seed=30)
         mps2 = _make_random_mps(N, d, D, seed=31)
         lr = self._full_left_sweep(mps1, mps2)
         env = lr[N - 1]
         val_lr = self._scalar_from_1x1_tensor(env)
-        val_ref = complex(mps1.inner(mps2))
+        val_ref = complex(inner(mps1, mps2))
         self.assertAlmostEqual(val_lr.real, val_ref.real, places=10)
         self.assertAlmostEqual(val_lr.imag, val_ref.imag, places=10)
 
@@ -794,7 +811,7 @@ class TestLRMPSMath(unittest.TestCase):
         self.assertAlmostEqual(val12.real, val21.real, places=10)
 
     def test_right_env_contraction_matches_inner(self):
-        """Full right sweep: LR[0] (incorporating sites N-1..0) matches mps1.inner(mps2).
+        """Full right sweep: LR[0] (incorporating sites N-1..0) matches inner(mps1, mps2).
 
         After `update_envs(-1, -1)`, LR[0] is the right environment built from the
         full chain.  Contracting it with L0 gives the overlap scalar.
@@ -808,9 +825,33 @@ class TestLRMPSMath(unittest.TestCase):
         lr.update_envs(-1, -1)   # compute all right envs; stale = [-1, -1]
         env = lr[0]   # right env incorporating sites 0..N-1, shape [1,1]
         val_lr = self._scalar_from_1x1_tensor(env)
-        val_ref = complex(mps1.inner(mps2))
+        val_ref = complex(inner(mps1, mps2))
         self.assertAlmostEqual(val_lr.real, val_ref.real, places=10)
         self.assertAlmostEqual(val_lr.imag, val_ref.imag, places=10)
+
+    def test_complex_self_overlap_is_real(self):
+        """<psi|psi> via VectorEnv is real and positive for a complex normalised MPS.
+
+        If the bra were not conjugated, imaginary parts would not cancel → imag != 0.
+        """
+        N, d, D = 4, 2, 3
+        mps = random_mps(N, d, D, dtype=complex, seed=70, normalize=True)
+        lr = self._full_left_sweep(mps, mps)
+        val = self._scalar_from_1x1_tensor(lr[N - 1])
+        self.assertAlmostEqual(val.imag, 0.0, places=10)
+        self.assertGreater(val.real, 0.0)
+
+    def test_complex_conjugate_symmetry(self):
+        """<psi1|psi2> = conj(<psi2|psi1>) for complex MPS via VectorEnv."""
+        N, d, D = 4, 2, 3
+        mps1 = random_mps(N, d, D, dtype=complex, seed=71, normalize=True)
+        mps2 = random_mps(N, d, D, dtype=complex, seed=72, normalize=True)
+        lr12 = self._full_left_sweep(mps1, mps2)
+        lr21 = self._full_left_sweep(mps2, mps1)
+        val12 = self._scalar_from_1x1_tensor(lr12[N - 1])
+        val21 = self._scalar_from_1x1_tensor(lr21[N - 1])
+        self.assertAlmostEqual(val12.real,  val21.real,  places=10)
+        self.assertAlmostEqual(val12.imag, -val21.imag,  places=10)
 
     def test_observer_integration_invalidates_cached_overlap(self):
         """Modifying mps1 via __setitem__ invalidates the cached LR env at that site."""

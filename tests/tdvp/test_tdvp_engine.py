@@ -1,4 +1,4 @@
-"""Unit tests for TDVP/tdvp_engine.py and the supporting MPS/linalg additions.
+"""Unit tests for TDVPEngine and Lanczos Krylov time evolution.
 
 Coverage
 --------

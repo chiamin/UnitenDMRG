@@ -1,4 +1,4 @@
-"""Unit tests for MPS/dmrg/effective_operators.py.
+"""Unit tests for EffOperator and EffVector.
 
 Coverage
 --------
@@ -8,7 +8,8 @@ Coverage
 
 2. EffVector.inner  (TestEffVectorInner)
    - inner(phi) returns a scalar
-   - inner(Φ_0) ≈ ||Φ_0||^2  (self-overlap)
+   - inner(Φ_0) ≈ ||Φ_0||^2  (self-overlap, real MPS)
+   - inner(Φ_0) ≈ ||Φ_0||^2  (self-overlap, genuinely complex MPS)
    - linearity: inner(alpha*phi) = alpha * inner(phi)
 
 3. EffOperator construction  (TestEffOperatorConstruction)
@@ -212,16 +213,27 @@ class TestEffVectorInner(unittest.TestCase):
         )
 
     def test_self_inner_equals_norm_squared(self):
-        """inner(Φ_0) == ||Φ_0||^2  (using Φ_0 itself as phi).
-
-        EffVector is constructed from the same MPS as the environment, so
-        Φ_0 is obtained by projecting the MPS through its own VectorEnv.
-        For right-canonical MPS, the environments are isometric and
-        inner(Φ_0) should equal ||Φ_0||^2.
-        """
+        """inner(Φ_0) == ||Φ_0||^2  (using Φ_0 itself as phi)."""
         result = self.ev.inner(self.phi0)
         norm2 = self.phi0.Norm().item() ** 2
         self.assertAlmostEqual(result.real, norm2, places=6)
+
+    def test_self_inner_complex_mps(self):
+        """inner on genuinely complex MPS: inner(Φ_0) is real and equals ||Φ_0||^2."""
+        rng = np.random.default_rng(seed=77)
+        sites = [
+            _make_mps_site(1, 2, 2, rng.random((1, 2, 2)) + 1j * rng.random((1, 2, 2))),
+            _make_mps_site(2, 2, 2, rng.random((2, 2, 2)) + 1j * rng.random((2, 2, 2))),
+            _make_mps_site(2, 2, 2, rng.random((2, 2, 2)) + 1j * rng.random((2, 2, 2))),
+            _make_mps_site(2, 2, 1, rng.random((2, 2, 1)) + 1j * rng.random((2, 2, 1))),
+        ]
+        mps_c = MPS(sites)
+        L, R = _vec_env_LR(mps_c, site=1)
+        ev = EffVector(L, R, mps_c[1])
+        result = ev.inner(ev.tensor)
+        norm2 = ev.tensor.Norm().item() ** 2
+        self.assertAlmostEqual(result.real, norm2, places=6)
+        self.assertAlmostEqual(result.imag, 0.0, places=6)
 
 
 # ===========================================================================

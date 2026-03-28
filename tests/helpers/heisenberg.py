@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-try:
-    import cytnx
-except ImportError as exc:
-    raise ImportError("cytnx is required for tests/helpers/heisenberg.py.") from exc
+import cytnx
 
 from MPS.mpo import MPO
 

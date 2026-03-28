@@ -21,10 +21,7 @@ state, pushing the optimisation away from previously found eigenstates.
 
 from __future__ import annotations
 
-try:
-    import cytnx
-except ImportError as exc:
-    raise ImportError("cytnx is required for dmrg_engine.py.") from exc
+import cytnx
 
 from MPS.mps import MPS
 from MPS.linalg import lanczos
@@ -92,7 +89,8 @@ class DMRGEngine:
         Parameters
         ----------
         max_dim    : int | None — max bond dimension to keep.
-        cutoff     : float — singular value cutoff.
+        cutoff     : float — cutoff on normalized rho eigenvalues at each
+                     local split.
         num_center : 1 or 2 — single-site or two-site DMRG.
 
         Returns

@@ -1,19 +1,18 @@
-"""Unit tests for MPS/linalg.py.
+"""Unit tests for linalg.
 
 Coverage
 --------
-1. Real-valued tests (currently enabled)
+1. Real-valued tests
    - inner: norm, symmetry, linearity
    - lanczos: energy/eigenvector/canonical convergence checks on real-symmetric H
 
-2. Complex-valued tests (kept separate, currently disabled)
-   - inner: conjugate symmetry and sesquilinearity
-   - lanczos: complex-Hermitian operator checks
+2. Complex-valued tests
+   - inner: self-overlap is real, conjugate symmetry, sesquilinearity
+   - lanczos: energy and eigenvector for complex-Hermitian H
 """
 
 from __future__ import annotations
 
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -32,10 +31,6 @@ except ImportError:
 
 if cytnx is not None:
     from MPS.linalg import inner, lanczos
-
-RUN_COMPLEX_TESTS = os.environ.get("RUN_COMPLEX_TESTS", "").lower() in {
-    "1", "true", "yes", "on"
-}
 
 
 # ---------------------------------------------------------------------------
@@ -220,42 +215,105 @@ class TestLanczosReal(unittest.TestCase):
 
 
 # ===========================================================================
-# 3. complex (separated; currently disabled)
+# 3. inner (complex)
 # ===========================================================================
 
-@unittest.skipUnless(
-    RUN_COMPLEX_TESTS,
-    "Set RUN_COMPLEX_TESTS=1 to enable complex-valued tests.",
-)
 @unittest.skipIf(cytnx is None, "cytnx not available")
 class TestInnerComplex(unittest.TestCase):
-    """Complex sesquilinear checks live separately from real-only suite."""
+    """Sesquilinearity and conjugate-symmetry checks for complex vectors.
 
-    def test_placeholder(self):
-        rng = np.random.default_rng(123)
-        v_np = rng.standard_normal(4) + 1j * rng.standard_normal(4)
-        w_np = rng.standard_normal(4) + 1j * rng.standard_normal(4)
-        v = _vec_complex(v_np)
-        w = _vec_complex(w_np)
-        self.assertAlmostEqual(inner(v, w), inner(w, v).conjugate(), places=10)
+    These tests would fail if the bra side were not complex-conjugated.
+    For a real vector, conj(v) == v, so the real tests cannot catch such bugs.
+    """
+
+    def setUp(self):
+        rng = np.random.default_rng(101)
+        self.v_np = rng.standard_normal(8) + 1j * rng.standard_normal(8)
+        self.w_np = rng.standard_normal(8) + 1j * rng.standard_normal(8)
+        self.alpha = 2.0 + 1.5j
+        self.v = _vec_complex(self.v_np)
+        self.w = _vec_complex(self.w_np)
+
+    def test_self_inner_is_real_and_positive(self):
+        """<v|v> is real and positive for a nonzero complex vector."""
+        result = inner(self.v, self.v)
+        expected = float(np.dot(self.v_np.conj(), self.v_np).real)
+        self.assertAlmostEqual(result.real, expected, places=10)
+        self.assertAlmostEqual(result.imag, 0.0, places=10)
+        self.assertGreater(result.real, 0.0)
+
+    def test_conjugate_symmetry(self):
+        """<v|w> = conj(<w|v>) for complex vectors."""
+        vw = complex(inner(self.v, self.w))
+        wv = complex(inner(self.w, self.v))
+        self.assertAlmostEqual(vw.real,  wv.real,  places=10)
+        self.assertAlmostEqual(vw.imag, -wv.imag,  places=10)
+
+    def test_linear_in_second_arg(self):
+        """<v|alpha*w> = alpha * <v|w>."""
+        scaled_w = self.w * self.alpha
+        lhs = complex(inner(self.v, scaled_w))
+        rhs = self.alpha * complex(inner(self.v, self.w))
+        self.assertAlmostEqual(lhs.real, rhs.real, places=10)
+        self.assertAlmostEqual(lhs.imag, rhs.imag, places=10)
+
+    def test_antilinear_in_first_arg(self):
+        """<alpha*v|w> = conj(alpha) * <v|w>."""
+        scaled_v = self.v * self.alpha
+        lhs = complex(inner(scaled_v, self.w))
+        rhs = self.alpha.conjugate() * complex(inner(self.v, self.w))
+        self.assertAlmostEqual(lhs.real, rhs.real, places=10)
+        self.assertAlmostEqual(lhs.imag, rhs.imag, places=10)
 
 
-@unittest.skipUnless(
-    RUN_COMPLEX_TESTS,
-    "Set RUN_COMPLEX_TESTS=1 to enable complex-valued tests.",
-)
+# ===========================================================================
+# 4. lanczos (complex)
+# ===========================================================================
+
 @unittest.skipIf(cytnx is None, "cytnx not available")
 class TestLanczosComplex(unittest.TestCase):
-    """Complex Hermitian checks live separately from real-only suite."""
+    """Lanczos correctness for complex-Hermitian operators.
 
-    def test_placeholder(self):
-        n = 4
-        H_np = _random_hermitian(n, seed=8)
+    These tests would fail if the inner product used inside Lanczos
+    did not correctly conjugate the bra side.
+    """
+
+    def _ground_state_numpy(self, H_np):
+        evals, evecs = np.linalg.eigh(H_np)
+        return float(evals[0].real), evecs[:, 0]
+
+    def test_energy_matches_numpy(self):
+        """Lanczos ground-state energy matches numpy eigh (complex Hermitian H)."""
+        n = 10
+        H_np = _random_hermitian(n, seed=11)
         apply = _matvec_func(H_np, _vec_complex)
-        v0 = _vec_complex(np.ones(n, dtype=complex))
-        E0, _ = lanczos(apply, v0, k=n)
-        E0_numpy = float(np.linalg.eigh(H_np)[0][0].real)
-        self.assertAlmostEqual(E0, E0_numpy, places=8)
+        rng = np.random.default_rng(17)
+        v0 = _vec_complex(rng.standard_normal(n) + 1j * rng.standard_normal(n))
+        E0_lanczos, _ = lanczos(apply, v0, k=n)
+        E0_numpy, _ = self._ground_state_numpy(H_np)
+        self.assertAlmostEqual(E0_lanczos, E0_numpy, places=8)
+
+    def test_eigenvector_is_normalised(self):
+        """Returned eigenvector has unit norm."""
+        n = 8
+        H_np = _random_hermitian(n, seed=12)
+        apply = _matvec_func(H_np, _vec_complex)
+        rng = np.random.default_rng(18)
+        v0 = _vec_complex(rng.standard_normal(n) + 1j * rng.standard_normal(n))
+        _, psi = lanczos(apply, v0, k=n)
+        self.assertAlmostEqual(psi.Norm().item(), 1.0, places=8)
+
+    def test_eigenvector_satisfies_eigenvalue_equation(self):
+        """H|psi> ≈ E0 * |psi> for complex Hermitian H."""
+        n = 8
+        H_np = _random_hermitian(n, seed=13)
+        apply = _matvec_func(H_np, _vec_complex)
+        rng = np.random.default_rng(19)
+        v0 = _vec_complex(rng.standard_normal(n) + 1j * rng.standard_normal(n))
+        E0, psi = lanczos(apply, v0, k=n)
+        H_psi_np = apply(psi).get_block().numpy().ravel()
+        psi_np   = psi.get_block().numpy().ravel()
+        np.testing.assert_allclose(H_psi_np, E0 * psi_np, atol=1e-6)
 
 
 if __name__ == "__main__":

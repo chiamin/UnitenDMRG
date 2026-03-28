@@ -18,18 +18,12 @@ Each site is rank 3. Internal order of axes may vary; the label set must be exac
 from __future__ import annotations
 
 import math
-import sys
 import weakref
 from typing import Iterable, Iterator
 
 import numpy as np
 
-try:
-    import cytnx
-except ImportError as exc:
-    raise ImportError(
-        "cytnx is required for mps.py. Install/import cytnx first."
-    ) from exc
+import cytnx
 
 from .uniTensor_core import assert_bond_match, qr_by_labels, scalar_from_uniTensor, svd_by_labels
 from .uniTensor_utils import any_complex_tensors, to_numpy_array
@@ -126,12 +120,12 @@ class MPS:
 
         The callback is stored as a weak reference so that *obj* can be garbage
         collected when it goes out of scope even if it is still registered here.
-        Each call to ``__setitem__`` fires ``obj.method_name(site)`` for every
+        Each call to `__setitem__` fires `obj.method_name(site)` for every
         live registered observer.
 
         Args:
             obj: Observer object that has a method named *method_name*.
-            method_name: Name of the method to call on *obj* (default ``"delete"``).
+            method_name: Name of the method to call on *obj* (default `"delete"`).
 
         Raises:
             AssertionError: If *obj* does not have a method called *method_name*.
@@ -208,30 +202,10 @@ class MPS:
         copied.center_right = self.center_right
         return copied
 
-    def inner(self, other: "MPS") -> float | complex:
-        """Overlap `<self|other>` via left environment contraction (`other` daggered per site)."""
-        self._check_compatible(other)
-        l1 = self.tensors[0].bond("l").redirect()
-        l2 = other.tensors[0].bond("l")
-        env_dtype = (
-            cytnx.Type.ComplexDouble
-            if (self.is_complex or other.is_complex)
-            else cytnx.Type.Double
-        )
-        env = cytnx.UniTensor([l1, l2], labels=["dn", "up"], dtype=env_dtype)
-        env.at([0, 0]).value = 1.0
-
-        for tensor_self, tensor_other in zip(self.tensors, other.tensors):
-            a1 = env.relabels(["up", "dn"], ["_up", "_dn"])
-            a2 = tensor_self.relabels(["l", "i", "r"], ["_dn", "i", "dn"])
-            a3 = tensor_other.Dagger().relabels(["l", "i", "r"], ["_up", "i", "up"])
-            tmp = cytnx.Contract(a1, a2)
-            env = cytnx.Contract(tmp, a3)
-        return scalar_from_uniTensor(env)
-
     def norm(self) -> float:
         """`sqrt(real(<psi|psi>))`."""
-        val = self.inner(self)
+        from .mps_operations import inner
+        val = inner(self, self)
         return math.sqrt(float(val.real))
 
     def normalize(self) -> "MPS":
@@ -369,45 +343,6 @@ class MPS:
                 f"got ({self.center_left}, {self.center_right})."
             )
 
-    def compress_bond(
-        self,
-        bond: int,
-        *,
-        max_dim: int | None = None,
-        cutoff: float = 0.0,
-        absorb: str = "right",
-    ) -> tuple[int, float]:
-        """Compress one bond in place via SVD truncation.
-
-        Args:
-            bond: Bond index to compress (0 to num_sites - 2).
-            max_dim: Maximum bond dimension to keep. None means no limit.
-            cutoff: Discard singular values below this threshold.
-            absorb: Which side to absorb the singular values into.
-
-        Returns:
-            Tuple of `(kept_dim, discarded_weight)`.
-        """
-        if not 0 <= bond < len(self) - 1:
-            raise IndexError(f"Bond {bond} is outside [0, {len(self) - 2}].")
-        if absorb not in {"left", "right"}:
-            raise ValueError("absorb must be 'left' or 'right'.")
-
-        left_new, right_new, kept_dim, discarded = compress_bond_tensors(
-            self.tensors[bond],
-            self.tensors[bond + 1],
-            absorb=absorb,
-            max_dim=max_dim,
-            cutoff=cutoff,
-        )
-        self.tensors[bond] = left_new
-        self.tensors[bond + 1] = right_new
-        center_site = bond if absorb == "left" else bond + 1
-        self.center_left = center_site
-        self.center_right = center_site
-        self._validate_bonds()
-        return kept_dim, discarded
-
     def _check_compatible(self, other: "MPS") -> None:
         """Same length and physical bond structure at every site."""
         if len(self) != len(other):
@@ -457,7 +392,7 @@ class MPS:
 
         Returns
         -------
-        phi : UniTensor with labels ``["l", "i0", ..., "i{n-1}", "r"]``.
+        phi : UniTensor with labels `["l", "i0", ..., "i{n-1}", "r"]`.
         """
         if not 0 <= p < len(self):
             raise IndexError(f"Site {p} out of range [0, {len(self)-1}].")
@@ -508,9 +443,10 @@ class MPS:
         p       : int — start site (same p passed to make_phi).
         phi     : UniTensor — merged tensor from make_phi.
         max_dim : int | None — max bond dimension (None = no limit).
-        cutoff  : float — discard singular values below this.
-        absorb  : ``"right"`` → sweep →, centre moves right;
-                  ``"left"``  → sweep ←, centre moves left.
+        cutoff  : float — discard Schmidt components whose normalized rho
+                  eigenvalue is below this threshold.
+        absorb  : `"right"` → sweep →, centre moves right;
+                  `"left"`  → sweep ←, centre moves left.
 
         Returns
         -------
@@ -660,67 +596,3 @@ class MPS:
                     getattr(obj, method_name)(site)
                 live.append((obj_ref, method_name))
         self._callbacks = live
-
-
-def svd_bond(
-    left: "cytnx.UniTensor",
-    right: "cytnx.UniTensor",
-    *,
-    absorb: str,
-    dim: int,
-    cutoff: float,
-) -> tuple["cytnx.UniTensor", "cytnx.UniTensor", float]:
-    """SVD a merged two-site MPS tensor and split back into site tensors.
-
-    Args:
-        left: Left site tensor with labels `l`, `i`, `r`.
-        right: Right site tensor with labels `l`, `i`, `r`.
-        absorb: Which side to absorb the singular values into (`"left"` or `"right"`).
-        dim: Maximum number of singular values to keep.
-        cutoff: Discard singular values below this threshold.
-
-    Returns:
-        Tuple of `(left_new, right_new, discarded_weight)`.
-    """
-    if absorb not in {"left", "right"}:
-        raise ValueError("absorb must be 'left' or 'right'.")
-
-    a1 = left.relabels(["i", "r"], ["i1", "_"])
-    a2 = right.relabels(["i", "l"], ["i2", "_"])
-    aa = cytnx.Contract(a1, a2)
-    # aa has labels: [l, i1, i2, r]
-
-    left_new, right_new, discarded = svd_by_labels(
-        aa,
-        row_labels=["l", "i1"],
-        absorb=absorb,
-        dim=dim,
-        cutoff=cutoff,
-        aux_label="aux",
-    )
-    left_new.relabels_(["i1", "aux"], ["i", "r"])
-    right_new.relabels_(["i2", "aux"], ["i", "l"])
-    return left_new, right_new, discarded
-
-
-def compress_bond_tensors(
-    left: "cytnx.UniTensor",
-    right: "cytnx.UniTensor",
-    *,
-    absorb: str,
-    max_dim: int | None,
-    cutoff: float,
-) -> tuple["cytnx.UniTensor", "cytnx.UniTensor", int, float]:
-    """Compress one MPS bond and return updated tensors and truncation info.
-
-    Returns:
-        Tuple of `(left_new, right_new, kept_dim, discarded_weight)`.
-    """
-    keep = sys.maxsize if max_dim is None else max_dim
-    if keep <= 0:
-        raise ValueError("max_dim must be positive.")
-    left_new, right_new, discarded = svd_bond(
-        left, right, absorb=absorb, dim=keep, cutoff=cutoff,
-    )
-    kept_dim = left_new.bond("r").dim()
-    return left_new, right_new, kept_dim, discarded

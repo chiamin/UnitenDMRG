@@ -15,7 +15,7 @@ if str(root) not in sys.path:
 
 from MPS.physical_sites import spin_half
 from MPS.auto_mpo import AutoMPO
-from MPS.measure import expectation, inner
+from MPS import expectation, inner
 from TDVP.tdvp_engine import TDVPEngine
 
 
@@ -43,11 +43,7 @@ def build_heisenberg(site, N, J=1.0, delta=1.0, h=0.0):
 
 
 def run_real_time(psi, H_mpo, n_sweeps=20, delta_t=0.1, max_dim=32):
-    """Run real-time TDVP and print energy/norm trend.
-
-    Note: with current backend, QN TDVP may fail in cytnx during environment
-    contractions. We catch and report it to keep this example runnable.
-    """
+    """Run real-time TDVP and print energy/norm trend."""
     engine = TDVPEngine(psi, H_mpo)
 
     print("\nReal-time TDVP (num_center=2)")

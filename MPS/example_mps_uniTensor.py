@@ -24,6 +24,7 @@ for path in [cwd, cwd.parent]:
         sys.path.insert(0, str(path))
 
 from MPS.mps import *
+from MPS.mps_operations import inner
 from MPS.uniTensor_core import *
 from MPS.uniTensor_utils import *
 
@@ -89,19 +90,6 @@ def main() -> None:
     left, right, dw = svd_by_labels(t, row_labels=["0", "1"], absorb="right", aux_label="x")
     print("svd_by_labels done:", isinstance(left, cytnx.UniTensor), isinstance(right, cytnx.UniTensor), "discarded:", dw)
 
-    print()
-    print("5) svd_bond")
-    left_new, right_new, discarded = svd_bond(a0, a1, absorb="left", dim=999999999, cutoff=0.0)
-    print("svd_bond discarded:", discarded)
-    print("new link dim:", left_new.bond("r").dim(), right_new.bond("l").dim())
-
-    print()
-    print("6) compress_bond_tensors")
-    left_c, right_c, kept_dim, disc = compress_bond_tensors(
-        a0, a1, absorb="right", max_dim=2, cutoff=0.0
-    )
-    print("compress_bond_tensors kept_dim:", kept_dim, "discarded:", disc)
-
     section("mps_uniTensor.py")
     print("1) Validate one site contract")
     assert_mps_site_uniTensor_labels(a0, 0)
@@ -136,7 +124,7 @@ def main() -> None:
 
     print()
     print("6) Overlap and norm workflow")
-    print("inner:", mps.inner(mps2))
+    print("inner:", inner(mps, mps2))
     print("norm before:", mps.norm())
     mps.normalize()
     print("norm after:", mps.norm())
@@ -149,9 +137,12 @@ def main() -> None:
     print("center after orthogonalize():", mps.center)
 
     print()
-    print("8) One-step compression using core function on MPS object")
-    kept, discarded = mps.compress_bond(0, max_dim=2, cutoff=0.0, absorb="right")
-    print("compress_bond kept:", kept, "discarded:", discarded)
+    print("8) MPS compression")
+    from MPS.mps_compression import svd_compress_mps, denmat_compress_mps
+    phi_svd    = svd_compress_mps(mps, max_dim=2)
+    phi_denmat = denmat_compress_mps(mps, max_dim=2)
+    print("svd_compress_mps    bond_dims:", phi_svd.bond_dims)
+    print("denmat_compress_mps bond_dims:", phi_denmat.bond_dims)
 
 
 if __name__ == "__main__":

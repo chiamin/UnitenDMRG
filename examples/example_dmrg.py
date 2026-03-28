@@ -34,7 +34,7 @@ delta = 1.0     # anisotropy (1 = isotropic Heisenberg)
 h     = 0.0     # longitudinal field
 seed  = 42
 
-# DMRG schedule: (max_bond_dim, SVD_cutoff)
+# DMRG schedule: (max_bond_dim, rho_eigenvalue_cutoff)
 schedule = [
     (10,  0.0),
     (20,  0.0),
