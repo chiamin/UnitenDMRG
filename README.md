@@ -2,6 +2,20 @@
 
 A Python implementation of the **Density Matrix Renormalization Group (DMRG)** algorithm for 1D quantum many-body systems, built on top of [Cytnx](https://github.com/Cytnx-dev/Cytnx) UniTensor as the tensor backend.
 
+## Installation
+
+### Requirements
+
+- Python ≥ 3.8
+- [Cytnx](https://github.com/Cytnx-dev/Cytnx) — see the [installation guide](https://kaihsinwu.gitlab.io/Cytnx_doc/install.html)
+- NumPy
+
+To verify that Cytnx is installed correctly:
+
+```bash
+python tests/smoke/test_install.py
+```
+
 ## Quick Start
 
 ```python
@@ -37,18 +51,4 @@ print(f"E/N = {E/N:.6f}")
 ```
 
 See [examples/](examples/) for more runnable scripts.
-
-## Installation
-
-### Requirements
-
-- Python ≥ 3.8
-- [Cytnx](https://github.com/Cytnx-dev/Cytnx) — see the [installation guide](https://kaihsinwu.gitlab.io/Cytnx_doc/install.html)
-- NumPy
-
-To verify that Cytnx is installed correctly:
-
-```bash
-python tests/smoke/test_install.py
-```
 
