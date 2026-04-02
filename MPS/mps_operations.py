@@ -6,10 +6,11 @@ operations are added.
 
 Current contents
 ----------------
-- `inner(psi, phi)`            -> `<psi|phi>`
-- `expectation(psi, mpo, phi)` -> `<psi|mpo|phi>`
-- `mps_sum(psi, phi)`          -> MPS representing |psi> + |phi>
-- `mpo_sum(mpo1, mpo2)`        -> MPO representing mpo1 + mpo2
+- `inner(psi, phi)`                            -> `<psi|phi>`
+- `expectation(psi, mpo, phi)`                 -> `<psi|mpo|phi>`
+- `mps_sum(psi, phi)`                          -> MPS representing |psi> + |phi>
+- `mpo_sum(mpo1, mpo2)`                        -> MPO representing mpo1 + mpo2
+- `fit_apply_mpo(mpo, mps_input, fitmps, ...)` -> approximate MPO|mps_input> by fitting
 """
 
 from __future__ import annotations
@@ -128,6 +129,99 @@ def mps_sum(psi: MPS, phi: MPS) -> MPS:
     result.center_left = 0
     result.center_right = N - 1
     return result
+
+
+def fit_apply_mpo(
+    mpo,
+    mps_input: MPS,
+    fitmps: MPS,
+    *,
+    num_center: int = 2,
+    nsweep: int = 1,
+    max_dim: int | None = None,
+    cutoff: float = 0.0,
+    normalize: bool = False,
+) -> MPS:
+    """Approximate `|fitmps> ≈ MPO|mps_input>` by variational fitting.
+
+    Minimizes `‖MPO|mps_input> - |fitmps>‖` by sweeping over the MPS sites and
+    solving each local subspace problem exactly (one contraction step, no
+    eigensolver).
+
+    `fitmps` is modified in-place and also returned.  The caller is responsible
+    for providing a reasonable initial `fitmps`; a closer initial guess
+    converges faster (often one sweep suffices).
+
+    Parameters
+    ----------
+    mpo       : MPO — operator to apply.
+    mps_input : MPS — input ket state |ψ>.
+    fitmps    : MPS — initial guess for the output state; modified in-place.
+                Must have a single orthogonality center at site 0.
+    num_center : 1 or 2 — number of sites optimised per local step.
+    nsweep    : int — number of full (right + left) sweeps to perform.
+    max_dim   : int | None — maximum bond dimension to keep per bond.
+    cutoff    : float — discard Schmidt components whose normalised rho
+                eigenvalue is below this threshold.
+    normalize : bool — if True, normalize `fitmps` after all sweeps.
+
+    Returns
+    -------
+    fitmps : the updated MPS (same object that was passed in).
+
+    Raises
+    ------
+    ValueError : if lengths mismatch, `num_center` is not 1 or 2, or
+                 `fitmps.center` is not 0 at entry.
+    """
+    from DMRG.environment import OperatorEnv
+    from DMRG.effective_operators import EffOperator
+
+    N = len(mps_input)
+    if len(mpo) != N or len(fitmps) != N:
+        raise ValueError(
+            f"Length mismatch: mpo={len(mpo)}, mps_input={N}, fitmps={len(fitmps)}."
+        )
+    if num_center not in (1, 2):
+        raise ValueError(f"num_center must be 1 or 2; got {num_center}.")
+    if fitmps.center != 0:
+        raise ValueError(
+            f"fitmps.center must be 0 at entry; got {fitmps.center}."
+        )
+
+    n = num_center
+
+    # Build environment for <fitmps|MPO|mps_input>.
+    # bra=fitmps, ket=mps_input.  Observer callbacks are registered on both
+    # so that fitmps.update_sites() automatically invalidates stale envs.
+    op_env = OperatorEnv(mps_input, fitmps, mpo, init_center=0)
+
+    def _local_update(p: int, absorb: str) -> None:
+        op_env.update_envs(p, p + n - 1)
+        mpo_tensors = [mpo[p + k] for k in range(n)]
+        effH = EffOperator(op_env[p - 1], op_env[p + n], *mpo_tensors)
+        phi_in = mps_input.make_phi(p, n)
+        phi_new = effH.apply(phi_in)
+        fitmps.update_sites(p, phi_new, max_dim=max_dim, cutoff=cutoff, absorb=absorb)
+
+    for _ in range(nsweep):
+        # Sweep right: p = 0 … N-2 (same for 1-site and 2-site).
+        # After this loop the orthogonality center of fitmps is at N-1.
+        for p in range(N - 1):
+            _local_update(p, absorb="right")
+
+        # Sweep left.
+        # 2-site: p = N-2 … 0,  1-site: p = N-1 … 1.
+        # After this loop the center is back at 0.
+        left_start = N - n
+        left_stop  = 0 if n == 2 else 1
+        for p in range(left_start, left_stop - 1, -1):
+            _local_update(p, absorb="left")
+
+    if normalize:
+        fitmps.normalize()
+
+    return fitmps
 
 
 def mpo_sum(mpo1: MPO, mpo2: MPO) -> MPO:

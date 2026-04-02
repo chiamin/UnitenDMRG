@@ -48,12 +48,12 @@ import sys
 import unittest
 from pathlib import Path
 
-import numpy as np
-
 THIS_DIR = Path(__file__).resolve().parent
 PKG_ROOT = THIS_DIR.parent.parent.parent
 if str(PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(PKG_ROOT))
+
+import numpy as np
 
 try:
     import cytnx
@@ -64,9 +64,13 @@ if cytnx is not None:
     from MPS.mps import MPS
     from MPS.mpo import MPO
     from MPS.mps_init import random_mps
+    from MPS.mps_operations import expectation
+    from MPS.physical_sites.spin_half import spin_half
+    from MPS.auto_mpo import AutoMPO
     from DMRG.environment import OperatorEnv, VectorEnv
     from DMRG.effective_operators import EffVector, EffOperator
     from MPS.linalg import inner as linalg_inner
+    from tests.helpers.mps_test_cases import random_u1_sz_mps
 
 
 # ===========================================================================
@@ -709,6 +713,279 @@ class TestEffOperatorIntegration(unittest.TestCase):
         inner_result = ev.inner(phi)
         norm2 = phi.Norm().item() ** 2
         self.assertAlmostEqual(inner_result.real, norm2, places=8)
+
+
+# ===========================================================================
+# 8. Dense complex — full dtype combinations
+# ===========================================================================
+
+@unittest.skipIf(cytnx is None, "cytnx not available")
+class TestEffOperatorDenseComplex(unittest.TestCase):
+    """EffOperator / EffVector with dense complex MPS, all dtype combos."""
+
+    N, d, D = 4, 2, 3
+
+    def _mps(self, dtype, seed):
+        return random_mps(self.N, self.d, self.D, dtype=dtype, seed=seed, normalize=True)
+
+    def _identity_mpo(self, dtype=float):
+        np_dt = np.complex128 if np.issubdtype(np.dtype(dtype), np.complexfloating) else np.float64
+        tensors = []
+        for _ in range(self.N):
+            arr = np.eye(self.d, dtype=np_dt).reshape(1, self.d, self.d, 1)
+            ut = cytnx.UniTensor(cytnx.from_numpy(arr), rowrank=2)
+            ut.set_labels(["l", "ip", "i", "r"])
+            tensors.append(ut)
+        return MPO(tensors)
+
+    def _rayleigh_at(self, mps, mpo, p, n=2):
+        """Compute <phi|H_eff|phi> / <phi|phi> at site p with n-site block.
+
+        Moves the MPS center to `p` first so that the Frobenius inner product
+        of phi matches the physical inner product.
+        """
+        mps.move_center(p)
+        op_env = OperatorEnv(mps, mps, mpo, init_center=p)
+        op_env.update_envs(p, p + n - 1)
+        L = op_env[p - 1]
+        R = op_env[p + n]
+        eff = EffOperator(L, R, *[mpo[p + i] for i in range(n)])
+        phi = mps.make_phi(p, n)
+        H_phi = eff.apply(phi)
+        energy = linalg_inner(phi, H_phi)
+        norm2  = linalg_inner(phi, phi)
+        return energy / norm2
+
+    # -- <real | real H | real> -------------------------------------------
+
+    def test_real_identity_rayleigh_is_one(self):
+        """<phi|I_eff|phi> / <phi|phi> = 1 for real MPS + real identity MPO."""
+        mps = self._mps(float, seed=400)
+        mpo = self._identity_mpo(dtype=float)
+        rq = self._rayleigh_at(mps, mpo, p=1, n=2)
+        self.assertAlmostEqual(rq.real, 1.0, places=8)
+        self.assertAlmostEqual(rq.imag, 0.0, places=8)
+
+    # -- <complex | real H | complex> -------------------------------------
+
+    def test_complex_mps_real_H_rayleigh_is_real(self):
+        """<phi|I_eff|phi> / <phi|phi> is real for complex MPS + real identity MPO."""
+        mps = self._mps(complex, seed=401)
+        mpo = self._identity_mpo(dtype=float)
+        rq = self._rayleigh_at(mps, mpo, p=1, n=2)
+        self.assertAlmostEqual(rq.imag, 0.0, places=8)
+        self.assertAlmostEqual(rq.real, 1.0, places=8)
+
+    # -- <complex | complex H | complex> ----------------------------------
+
+    def test_complex_mps_complex_H_rayleigh_is_real(self):
+        """<phi|I_eff|phi> / <phi|phi> is real for complex MPS + complex identity MPO."""
+        mps = self._mps(complex, seed=402)
+        mpo = self._identity_mpo(dtype=complex)
+        rq = self._rayleigh_at(mps, mpo, p=1, n=2)
+        self.assertAlmostEqual(rq.imag, 0.0, places=8)
+        self.assertAlmostEqual(rq.real, 1.0, places=8)
+
+    # -- EffVector.inner complex ------------------------------------------
+
+    def test_effvector_complex_self_overlap_is_real(self):
+        """EffVector.inner(Phi0) is real and positive for complex MPS."""
+        mps = self._mps(complex, seed=403)
+        p = 1
+        vec_env = VectorEnv(mps, mps, init_center=p)
+        ev = EffVector(vec_env[p - 1], vec_env[p + 1], mps[p])
+        result = ev.inner(ev.tensor)
+        self.assertAlmostEqual(result.imag, 0.0, places=8)
+        self.assertGreater(result.real, 0.0)
+
+    def test_effvector_complex_conjugate_symmetry(self):
+        """<Phi1|Phi2> = conj(<Phi2|Phi1>) for complex MPS."""
+        mps1 = self._mps(complex, seed=404)
+        mps2 = self._mps(complex, seed=405)
+        p = 1
+        vec_env = VectorEnv(mps1, mps2, init_center=p)
+        ev = EffVector(vec_env[p - 1], vec_env[p + 1], mps1[p])
+
+        vec_env2 = VectorEnv(mps2, mps1, init_center=p)
+        ev2 = EffVector(vec_env2[p - 1], vec_env2[p + 1], mps2[p])
+
+        phi1 = mps2.make_phi(p, 1)
+        phi2 = mps1.make_phi(p, 1)
+
+        val12 = ev.inner(phi1)
+        val21 = ev2.inner(phi2)
+        self.assertAlmostEqual(val12.real,  val21.real,  places=8)
+        self.assertAlmostEqual(val12.imag, -val21.imag,  places=8)
+
+
+# ===========================================================================
+# 9. QN EffOperator
+# ===========================================================================
+
+def _qn_mps(dtype, seed, N=4):
+    return random_u1_sz_mps(num_sites=N, n_up_total=N // 2, seed=seed,
+                            dtype=dtype, center=0, normalize=True)
+
+
+def _qn_heisenberg_mpo(N):
+    site = spin_half(qn="Sz")
+    ampo = AutoMPO(N, site)
+    for i in range(N - 1):
+        ampo.add(1.0, "Sz", i, "Sz", i + 1)
+        ampo.add(0.5, "Sp", i, "Sm", i + 1)
+        ampo.add(0.5, "Sm", i, "Sp", i + 1)
+    return ampo.to_mpo()
+
+
+@unittest.skipIf(cytnx is None, "cytnx not available")
+class TestEffOperatorQN(unittest.TestCase):
+    """EffOperator with QN tensors — real and complex."""
+
+    N = 4
+
+    def _rayleigh_at(self, mps, mpo, p, n=1):
+        """Compute <phi|H_eff|phi> / <phi|phi> at site p."""
+        mps.move_center(p)
+        op_env = OperatorEnv(mps, mps, mpo, init_center=p)
+        op_env.update_envs(p, p + n - 1)
+        L = op_env[p - 1]
+        R = op_env[p + n]
+        eff = EffOperator(L, R, *[mpo[p + i] for i in range(n)])
+        phi = mps.make_phi(p, n)
+        H_phi = eff.apply(phi)
+        energy = linalg_inner(phi, H_phi)
+        norm2  = linalg_inner(phi, phi)
+        return energy / norm2
+
+    # -- <real | real H | real> -------------------------------------------
+
+    def test_qn_real_rayleigh_is_real(self):
+        """Rayleigh quotient is real for real QN MPS + real Heisenberg H."""
+        mps = _qn_mps(float, seed=500)
+        mpo = _qn_heisenberg_mpo(self.N)
+        rq = self._rayleigh_at(mps, mpo, p=1, n=1)
+        self.assertAlmostEqual(rq.imag, 0.0, places=8)
+        self.assertTrue(np.isfinite(rq.real))
+
+    def test_qn_real_2site_rayleigh_is_real(self):
+        """2-site Rayleigh quotient is real for real QN MPS."""
+        mps = _qn_mps(float, seed=501)
+        mpo = _qn_heisenberg_mpo(self.N)
+        rq = self._rayleigh_at(mps, mpo, p=1, n=2)
+        self.assertAlmostEqual(rq.imag, 0.0, places=8)
+
+    # -- <complex | real H | complex> -------------------------------------
+
+    def test_qn_complex_real_H_rayleigh_is_real(self):
+        """Rayleigh quotient is real for complex QN MPS + real Heisenberg H."""
+        mps = _qn_mps(complex, seed=510)
+        mpo = _qn_heisenberg_mpo(self.N)
+        rq = self._rayleigh_at(mps, mpo, p=1, n=1)
+        self.assertAlmostEqual(rq.imag, 0.0, places=8)
+        self.assertTrue(np.isfinite(rq.real))
+
+    # -- <complex | complex H | complex> ----------------------------------
+
+    def test_qn_complex_complex_H_rayleigh_is_real(self):
+        """Rayleigh quotient is real for complex QN MPS + complex Heisenberg H."""
+        mps = _qn_mps(complex, seed=512)
+        mpo = _qn_heisenberg_mpo(self.N)
+        mpo_c = MPO([t.astype(cytnx.Type.ComplexDouble) for t in mpo.tensors])
+        rq = self._rayleigh_at(mps, mpo_c, p=1, n=1)
+        self.assertAlmostEqual(rq.imag, 0.0, places=8)
+        self.assertTrue(np.isfinite(rq.real))
+
+    # -- 1-site Rayleigh vs full expectation ------------------------------
+
+    def test_qn_real_rayleigh_matches_expectation(self):
+        """1-site Rayleigh quotient matches full-chain expectation for QN MPS."""
+        mps = _qn_mps(float, seed=520)
+        mpo = _qn_heisenberg_mpo(self.N)
+        rq = self._rayleigh_at(mps, mpo, p=0, n=1)
+        ref = complex(expectation(mps, mpo, mps))
+        self.assertAlmostEqual(rq.real, ref.real, places=8)
+
+    def test_qn_complex_rayleigh_matches_expectation(self):
+        """1-site Rayleigh quotient matches full-chain expectation for complex QN MPS."""
+        mps = _qn_mps(complex, seed=521)
+        mpo = _qn_heisenberg_mpo(self.N)
+        rq = self._rayleigh_at(mps, mpo, p=0, n=1)
+        ref = complex(expectation(mps, mpo, mps))
+        self.assertAlmostEqual(rq.real, ref.real, places=8)
+        self.assertAlmostEqual(rq.imag, 0.0, places=8)
+
+
+# ===========================================================================
+# 10. QN EffVector
+# ===========================================================================
+
+@unittest.skipIf(cytnx is None, "cytnx not available")
+class TestEffVectorQN(unittest.TestCase):
+    """EffVector with QN tensors — real and complex."""
+
+    N = 4
+
+    # -- real QN --
+
+    def test_qn_real_self_overlap_is_norm_squared(self):
+        """EffVector.inner(Phi0) == ||Phi0||^2 for real QN MPS."""
+        mps = _qn_mps(float, seed=600)
+        p = 1
+        mps.move_center(p)
+        vec_env = VectorEnv(mps, mps, init_center=p)
+        ev = EffVector(vec_env[p - 1], vec_env[p + 1], mps[p])
+        result = ev.inner(ev.tensor)
+        norm2 = ev.tensor.Norm().item() ** 2
+        self.assertAlmostEqual(result.real, norm2, places=6)
+
+    def test_qn_real_inner_matches_mps_inner(self):
+        """EffVector.inner gives value consistent with full MPS inner product."""
+        mps1 = _qn_mps(float, seed=601)
+        mps2 = _qn_mps(float, seed=602)
+        p = 1
+        mps1.move_center(p)
+        mps2.move_center(p)
+        vec_env = VectorEnv(mps1, mps2, init_center=p)
+        ev = EffVector(vec_env[p - 1], vec_env[p + 1], mps1[p])
+        phi2 = mps2.make_phi(p, 1)
+        result = ev.inner(phi2)
+        self.assertIsInstance(result, (complex, float))
+
+    # -- complex QN --
+
+    def test_qn_complex_self_overlap_is_real_positive(self):
+        """EffVector.inner(Phi0) is real and positive for complex QN MPS."""
+        mps = _qn_mps(complex, seed=610)
+        p = 1
+        mps.move_center(p)
+        vec_env = VectorEnv(mps, mps, init_center=p)
+        ev = EffVector(vec_env[p - 1], vec_env[p + 1], mps[p])
+        result = ev.inner(ev.tensor)
+        norm2 = ev.tensor.Norm().item() ** 2
+        self.assertAlmostEqual(result.real, norm2, places=6)
+        self.assertAlmostEqual(result.imag, 0.0, places=6)
+
+    def test_qn_complex_conjugate_symmetry(self):
+        """<Phi1|phi2> = conj(<Phi2|phi1>) for complex QN MPS."""
+        mps1 = _qn_mps(complex, seed=620)
+        mps2 = _qn_mps(complex, seed=621)
+        p = 1
+        mps1.move_center(p)
+        mps2.move_center(p)
+
+        vec_env12 = VectorEnv(mps1, mps2, init_center=p)
+        ev12 = EffVector(vec_env12[p - 1], vec_env12[p + 1], mps1[p])
+
+        vec_env21 = VectorEnv(mps2, mps1, init_center=p)
+        ev21 = EffVector(vec_env21[p - 1], vec_env21[p + 1], mps2[p])
+
+        phi2 = mps2.make_phi(p, 1)
+        phi1 = mps1.make_phi(p, 1)
+
+        val12 = ev12.inner(phi2)
+        val21 = ev21.inner(phi1)
+        self.assertAlmostEqual(val12.real,  val21.real,  places=8)
+        self.assertAlmostEqual(val12.imag, -val21.imag,  places=8)
 
 
 if __name__ == "__main__":

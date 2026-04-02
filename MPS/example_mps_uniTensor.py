@@ -2,10 +2,9 @@
 
 Run from the project root with:
 
-    source "/home/chiamin/miniconda3/etc/profile.d/conda.sh"
-    conda activate cytnx
-    cd "/home/chiamin/project/code/tensors/Uni10"
-    python "MPS/example_mps_uniTensor.py"
+    LD_LIBRARY_PATH=/home/chiamin/miniconda3/lib:$LD_LIBRARY_PATH \
+    PYTHONPATH=/home/chiamin/.local \
+    python3.11 MPS/example_mps_uniTensor.py
 """
 
 from __future__ import annotations
@@ -92,7 +91,8 @@ def main() -> None:
 
     section("mps_uniTensor.py")
     print("1) Validate one site contract")
-    assert_mps_site_uniTensor_labels(a0, 0)
+    from MPS.mps import _check_labels
+    _check_labels(a0, 0)
 
     print()
     print("2) Construct MPS and inspect basic metadata")
@@ -138,11 +138,11 @@ def main() -> None:
 
     print()
     print("8) MPS compression")
-    from MPS.mps_compression import svd_compress_mps, denmat_compress_mps
-    phi_svd    = svd_compress_mps(mps, max_dim=2)
-    phi_denmat = denmat_compress_mps(mps, max_dim=2)
-    print("svd_compress_mps    bond_dims:", phi_svd.bond_dims)
-    print("denmat_compress_mps bond_dims:", phi_denmat.bond_dims)
+    from MPS.mps_compression import svd_compress_mps
+    phi_svd = svd_compress_mps(mps, max_dim=2)
+    print("svd_compress_mps bond_dims:", phi_svd.bond_dims)
+    # denmat_compress_mps is commented out until cytnx fixes "svd-aux-qnums".
+    # See _internal/CYTNX_BUGS.md and _internal/TODO.md.
 
 
 if __name__ == "__main__":

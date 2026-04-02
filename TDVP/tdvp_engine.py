@@ -22,11 +22,13 @@ Usage
 
 from __future__ import annotations
 
+import sys
+
 import cytnx
 
 from MPS.mps import MPS
 from MPS.linalg import lanczos_expm_multiply
-from MPS.uniTensor_core import qr_by_labels
+from MPS.uniTensor_core import svd_by_labels
 from DMRG.environment import OperatorEnv
 from DMRG.effective_operators import EffOperator
 
@@ -113,23 +115,28 @@ class TDVPEngine:
     def _update_1site(self, p: int, dt: complex, absorb: str) -> None:
         """1-site TDVP local update at site p.
 
-        absorb='right': forward + QR + backward into p+1  (right sweep)
-        absorb='left' : forward + QR + backward into p-1  (left sweep)
+        absorb='right': forward + SVD + backward + absorb into p+1
+        absorb='left' : forward + SVD + backward + absorb into p-1
 
         Boundary sites (p=N-1 for right, p=0 for left) only do forward.
+
+        Steps:
+            1. Forward propagation: phi = exp(-dt/2 * H_eff) |psi[p]>
+            2. SVD: split phi into A (isometry) and C (bond tensor)
+            3. Build 0-site env from op_env and A (without updating psi)
+            4. Backward propagation: C' = exp(+dt/2 * H_eff_0site) |C>
+            5. Absorb C' into neighbour, update both psi[p] and neighbour
         """
         psi = self.psi
         N   = len(psi)
         _i0 = MPS._phi_label(0)
 
         # ── 1. Prepare environments ────────────────────────────────────
-        # Need op_env[p-1] (left) and op_env[p+1] (right).
         self._op_env.update_envs(p, p)
 
         # ── 2. Forward propagation ─────────────────────────────────────
-        # phi = exp(-dt/2 * H_eff_1site) |psi[p]>
         effH = EffOperator(self._op_env[p - 1], self._op_env[p + 1], self.H[p])
-        phi  = psi.make_phi(p, 1)                              # ["l","i0","r"]
+        phi  = psi.make_phi(p, 1)
         phi  = lanczos_expm_multiply(effH.apply, phi, -0.5 * dt)
 
         # ── Boundary: no backward propagation ─────────────────────────
@@ -141,85 +148,72 @@ class TDVPEngine:
             psi.center_left = psi.center_right = p
             return
 
-        # ── 3. QR decompose ────────────────────────────────────────────
+        # ── 3. SVD decompose ───────────────────────────────────────────
         if absorb == "right":
-            # Left-orthogonalise: row = ["l","i0"]
-            #   A : ["l","i0","_s"]
-            #   C : ["_s","r"]           ← bond tensor
-            A, C = qr_by_labels(phi, row_labels=["l", _i0], aux_label="_s")
+            # row=["l","i0"] (all BD_IN), col=["r"]
+            A, C, _ = svd_by_labels(
+                phi, row_labels=["l", _i0], col_labels=["r"],
+                absorb="right", aux_label="_s",
+            )
             A.relabels_(["l", _i0, "_s"], ["l", "i", "r"])
-            # C["_s"] → new bond (A's right), C["r"] → psi[p+1]'s left bond.
-            # Relabel so C["r"] matches psi[p+1]["l"] on contraction:
-            #   "_s" → "_new_l",  "r" → "l"  (mirrors _shift_center_right_qr)
-            C.relabels_(["_s", "r"], ["_new_l", "l"])
-
-        else:  # absorb == "left"
-            # Right-orthogonalise: row = ["i0","r"]
-            #   A : ["i0","r","_s"]
-            #   C : ["_s","l"]           ← bond tensor
-            A, C = qr_by_labels(phi, row_labels=[_i0, "r"], aux_label="_s")
-            A.permute_([_i0, "r", "_s"])
-            A.set_labels(["i", "r", "_s"])
-            A.permute_(["_s", "i", "r"])
-            A.set_labels(["l", "i", "r"])
-            A.set_rowrank_(2)
-            # C["_s"] → new bond (A's left), C["l"] → psi[p-1]'s right bond.
-            # Relabel so C["l"] matches psi[p-1]["r"] on contraction:
-            #   "_s" → "_new_r",  "l" → "r"
-            C.relabels_(["_s", "l"], ["_new_r", "r"])
-
-        # ── 4. Update psi[p] ───────────────────────────────────────────
-        # Bypass __setitem__ bond validation: QR may reduce the right bond when
-        # D_l*d < D_r (over-specified state).  psi[p+1] will be fixed in step 6.
-        psi.tensors[p] = A
-        psi.center_left = min(psi.center_left, p)
-        psi.center_right = max(psi.center_right, p)
-        self._op_env.delete(p)   # fire the callback that __setitem__ would fire
-
-        if absorb == "right":
-            psi.center_left = psi.center_right = p + 1
-            # update_envs(p+1, p): computes LR[p] with new A;
-            # stale window → [p+1, p] = EMPTY → both LR[p] and LR[p+1] valid.
-            self._op_env.update_envs(p + 1, p)
+            # C: (_s, r) — bond tensor with labels ["_s", "r"]
         else:
-            psi.center_left = psi.center_right = p - 1
-            # update_envs(p, p-1): computes LR[p] with new A;
-            # stale window → [p, p-1] = EMPTY → both LR[p-1] and LR[p] valid.
-            self._op_env.update_envs(p, p - 1)
+            # row=["l"] (all BD_IN), col=["i0","r"]
+            C, A, _ = svd_by_labels(
+                phi, row_labels=["l"], col_labels=[_i0, "r"],
+                absorb="left", aux_label="_s",
+            )
+            A.relabels_(["_s", _i0, "r"], ["l", "i", "r"])
+            # C: (l, _s) — bond tensor with labels ["l", "_s"]
+
+        # ── 4. Build 0-site env from op_env and A ──────────────────────
+        # Grow the environment by one site using A, without modifying
+        # self._op_env.  This gives us the 0-site left/right env pair.
+        if absorb == "right":
+            # Grow left env: op_env[p-1] + A + W[p] + A† → new_L (= env at p)
+            L_prev = self._op_env[p - 1]
+            E  = L_prev.relabels(["mid", "dn", "up"], ["_mid", "_dn", "_up"])
+            A1 = A.relabels(["l", "i", "r"], ["_dn", "_i", "dn"])
+            W  = self.H[p].relabels(["l", "ip", "i", "r"], ["_mid", "_ip", "_i", "mid"])
+            A2 = A.Dagger().relabels(["l", "i", "r"], ["_up", "_ip", "up"])
+            tmp = cytnx.Contract(E, A1)
+            tmp = cytnx.Contract(tmp, W)
+            new_L = cytnx.Contract(tmp, A2)
+            effH_0 = EffOperator(new_L, self._op_env[p + 1])
+        else:
+            # Grow right env: op_env[p+1] + A + W[p] + A† → new_R (= env at p)
+            R_next = self._op_env[p + 1]
+            E  = R_next.relabels(["mid", "dn", "up"], ["_mid", "_dn", "_up"])
+            A1 = A.relabels(["r", "i", "l"], ["_dn", "_i", "dn"])
+            W  = self.H[p].relabels(["l", "ip", "i", "r"], ["mid", "_ip", "_i", "_mid"])
+            A2 = A.Dagger().relabels(["r", "i", "l"], ["_up", "_ip", "up"])
+            tmp = cytnx.Contract(E, A1)
+            tmp = cytnx.Contract(tmp, W)
+            new_R = cytnx.Contract(tmp, A2)
+            effH_0 = EffOperator(self._op_env[p - 1], new_R)
 
         # ── 5. Backward propagation ────────────────────────────────────
-        # C' = exp(+dt/2 * H_eff_0site) |C>
-        if absorb == "right":
-            effH_0 = EffOperator(self._op_env[p], self._op_env[p + 1])
-        else:
-            effH_0 = EffOperator(self._op_env[p - 1], self._op_env[p])
-
         # Rename C to canonical ["l","r"] for EffOperator.apply()
         if absorb == "right":
-            C.relabels_(["_new_l", "l"], ["l", "r"])
+            C.relabels_(["_s", "r"], ["l", "r"])
         else:
-            C.relabels_(["_new_r", "r"], ["r", "l"])
-            C.permute_(["l", "r"])
-            C.set_labels(["l", "r"])
+            C.relabels_(["l", "_s"], ["l", "r"])
 
         C = lanczos_expm_multiply(effH_0.apply, C, +0.5 * dt)
 
-        # ── 6. Absorb C into neighbour ─────────────────────────────────
+        # ── 6. Absorb C into neighbour and update psi ──────────────────
         if absorb == "right":
-            # Contract C["r"] with psi[p+1]["l"]
-            # C currently has labels ["l","r"]; rename "r"→"l" to match psi[p+1]["l"]
             C.relabels_(["l", "r"], ["_new_l", "l"])
-            new_nb = cytnx.Contract(C, psi[p + 1])   # contracts "l"
+            new_nb = cytnx.Contract(C, psi[p + 1])
             new_nb.relabels_(["_new_l", "i", "r"], ["l", "i", "r"])
-            psi[p + 1] = new_nb   # fires op_env.delete(p+1)
-
-        else:  # absorb == "left"
-            # Contract psi[p-1]["r"] with C["l"]
-            # C currently has labels ["l","r"]; rename "l"→"r" to match psi[p-1]["r"]
+            psi.set_sites({p: A, p + 1: new_nb})
+            psi.center_left = psi.center_right = p + 1
+        else:
             C.relabels_(["l", "r"], ["r", "_new_r"])
-            new_nb = cytnx.Contract(psi[p - 1], C)   # contracts "r"
+            new_nb = cytnx.Contract(psi[p - 1], C)
             new_nb.relabels_(["l", "i", "_new_r"], ["l", "i", "r"])
-            psi[p - 1] = new_nb   # fires op_env.delete(p-1)
+            psi.set_sites({p - 1: new_nb, p: A})
+            psi.center_left = psi.center_right = p - 1
 
     # ------------------------------------------------------------------
     # 2-site local update

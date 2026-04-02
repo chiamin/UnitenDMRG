@@ -16,20 +16,20 @@ from pathlib import Path
 
 import numpy as np
 
-THIS_DIR = Path(__file__).resolve().parent
-PKG_ROOT = THIS_DIR.parent.parent.parent
-if str(PKG_ROOT) not in sys.path:
-    sys.path.insert(0, str(PKG_ROOT))
-
 try:
     import cytnx
 except ImportError:  # pragma: no cover
     cytnx = None
 
+THIS_DIR = Path(__file__).resolve().parent
+PKG_ROOT = THIS_DIR.parent.parent.parent
+if str(PKG_ROOT) not in sys.path:
+    sys.path.insert(0, str(PKG_ROOT))
+
 if cytnx is not None:
     from MPS.mps import (
         MPS,
-        assert_mps_site_uniTensor_labels,
+        _check_labels,
     )
     from MPS.auto_mpo import AutoMPO
     from MPS.mps_init import random_mps
@@ -51,7 +51,7 @@ else:  # pragma: no cover
     def _missing_cytnx(*_args, **_kwargs):
         raise RuntimeError("cytnx is required")
 
-    assert_mps_site_uniTensor_labels = _missing_cytnx
+    _check_labels = _missing_cytnx
     AutoMPO = _missing_cytnx
     expectation = _missing_cytnx
     mps_sum = _missing_cytnx
@@ -417,14 +417,14 @@ class TestMPS(unittest.TestCase):
         with self.assertRaises(TypeError):
             MPS([np.zeros((1, 2, 1))])
 
-    def test_assert_mps_site_uniTensor_labels(self) -> None:
+    def test_check_labels(self) -> None:
         """Site label validator should accept l/i/r and reject invalid labels."""
         t = _make_site(1, 2, 1)
-        assert_mps_site_uniTensor_labels(t, 0)
+        _check_labels(t, 0)
         bad = t.clone()
         bad.set_labels(["x", "y", "z"])
         with self.assertRaises(ValueError):
-            assert_mps_site_uniTensor_labels(bad, 0)
+            _check_labels(bad, 0)
 
     def test_basic_sequence_protocol_and_repr(self) -> None:
         """MPS should expose sequence protocol and shape summary properties."""

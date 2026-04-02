@@ -57,19 +57,22 @@ from pathlib import Path
 
 import numpy as np
 
-THIS_DIR = Path(__file__).resolve().parent
-PKG_ROOT = THIS_DIR.parent.parent
-if str(PKG_ROOT) not in sys.path:
-    sys.path.insert(0, str(PKG_ROOT))
-
 try:
     import cytnx
 except ImportError:
     cytnx = None
 
+THIS_DIR = Path(__file__).resolve().parent
+PKG_ROOT = THIS_DIR.parent.parent
+if str(PKG_ROOT) not in sys.path:
+    sys.path.insert(0, str(PKG_ROOT))
+
 if cytnx is not None:
     from MPS.mps_init import random_mps
     from tests.helpers.heisenberg import heisenberg_mpo
+    from tests.helpers.mps_test_cases import random_u1_sz_mps
+    from MPS.physical_sites import spin_half
+    from MPS.auto_mpo import AutoMPO
     from MPS.linalg import lanczos_expm_multiply, inner
     from DMRG.effective_operators import EffOperator
     from DMRG.environment import OperatorEnv
@@ -164,6 +167,25 @@ def _energy(psi, H_mpo) -> float:
     phi  = psi.make_phi(0, 1)
     E, _ = lanczos(effH.apply, phi, k=1)
     return E
+
+
+def _make_qn_psi(N: int, n_up: int, seed: int = 0, dtype=float) -> "MPS":
+    """Random QN MPS (U(1) N_up) with center at 0."""
+    return random_u1_sz_mps(N, n_up, seed=seed, dtype=dtype, center=0)
+
+
+def _qn_heisenberg_mpo(N: int, dtype=float):
+    """Build a QN Heisenberg MPO via AutoMPO + spin_half(qn="Sz")."""
+    site = spin_half(qn="Sz")
+    ampo = AutoMPO(N, site)
+    J, delta = 1.0, 1.0
+    if np.issubdtype(np.dtype(dtype), np.complexfloating):
+        J, delta = complex(J), complex(delta)
+    for i in range(N - 1):
+        ampo.add(J * delta, "Sz", i, "Sz", i + 1)
+        ampo.add(J / 2, "Sp", i, "Sm", i + 1)
+        ampo.add(J / 2, "Sm", i, "Sp", i + 1)
+    return ampo.to_mpo()
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +667,181 @@ class TestTDVPImaginaryTime(unittest.TestCase):
     def test_imagtime_energy_monotone(self):
         """Imaginary-time energy must be non-increasing sweep by sweep."""
         psi    = _make_psi(self.N, D=4, seed=3)
+        engine = TDVPEngine(psi, self.H_mpo)
+        energies = []
+        for _ in range(5):
+            engine.sweep(dt=0.1, max_dim=12, cutoff=1e-10, num_center=2)
+            energies.append(self._measure_energy(psi))
+        for i in range(1, len(energies)):
+            self.assertLessEqual(energies[i], energies[i - 1] + 1e-6,
+                                 msg=f"Energy increased at step {i}: "
+                                     f"{energies[i-1]:.6f} → {energies[i]:.6f}")
+
+
+# ---------------------------------------------------------------------------
+# 11. QN norm preservation — real-time evolution
+# ---------------------------------------------------------------------------
+
+@unittest.skipIf(cytnx is None, "cytnx not available")
+class TestTDVPNormPreservationQN(unittest.TestCase):
+    """Real-time TDVP with QN MPS must preserve the MPS norm."""
+
+    N     = 4
+    N_UP  = 2       # half-filling → Sz = 0
+    ATOL  = 1e-5
+
+    @staticmethod
+    def _mps_norm(psi) -> float:
+        """||psi|| via Frobenius norm of the center tensor (center must be 0).
+
+        Uses UniTensor.Norm() which sums over all blocks for QN tensors.
+        """
+        psi.move_center(0)
+        return float(psi[0].Norm().item())
+
+    def _check_norm(self, num_center: int, n_sweeps: int = 4,
+                    max_dim: int = 8) -> None:
+        psi   = _make_qn_psi(self.N, self.N_UP, seed=0, dtype=complex)
+        H_mpo = _qn_heisenberg_mpo(self.N, dtype=complex)
+        norm_before = self._mps_norm(psi)
+        engine = TDVPEngine(psi, H_mpo)
+        dt_real = 1j * 0.05
+        for _ in range(n_sweeps):
+            engine.sweep(dt=dt_real, max_dim=max_dim, cutoff=0.0,
+                         num_center=num_center)
+        norm_after = self._mps_norm(psi)
+        self.assertAlmostEqual(norm_after / norm_before, 1.0, delta=self.ATOL)
+
+    def test_1site_norm_preserved(self):
+        """1-site real-time QN TDVP preserves the MPS norm."""
+        self._check_norm(num_center=1)
+
+    def test_2site_norm_preserved(self):
+        """2-site real-time QN TDVP preserves the MPS norm."""
+        self._check_norm(num_center=2)
+
+
+# ---------------------------------------------------------------------------
+# 12. QN energy conservation — real-time evolution
+# ---------------------------------------------------------------------------
+
+@unittest.skipIf(cytnx is None, "cytnx not available")
+class TestTDVPEnergyConservationQN(unittest.TestCase):
+    """<H> must be conserved during real-time QN TDVP evolution."""
+
+    N     = 4
+    N_UP  = 2
+    ATOL  = 1e-3
+
+    @classmethod
+    def setUpClass(cls):
+        """Prepare a good initial QN state by running DMRG first."""
+        from DMRG.dmrg_engine import DMRGEngine
+        cls.H_mpo = _qn_heisenberg_mpo(cls.N, dtype=complex)
+        psi = _make_qn_psi(cls.N, cls.N_UP, seed=0, dtype=complex)
+        engine = DMRGEngine(psi, cls.H_mpo)
+        for max_dim in [8, 16, 16]:
+            E0, _ = engine.sweep(max_dim=max_dim, cutoff=1e-10)
+        cls.E0_dmrg = E0
+        cls.psi0    = psi
+
+    def _measure_energy(self, psi) -> float:
+        """<psi|H|psi> via Rayleigh quotient at site 0."""
+        from MPS.linalg import lanczos
+        psi.move_center(0)
+        op_env = OperatorEnv(psi, psi, self.H_mpo, init_center=0)
+        op_env.update_envs(0, 0)
+        effH = EffOperator(op_env[-1], op_env[1], self.H_mpo[0])
+        phi  = psi.make_phi(0, 1)
+        E, _ = lanczos(effH.apply, phi, k=1)
+        return E
+
+    def test_1site_energy_conserved(self):
+        """Real-time 1-site QN TDVP conserves <H> across 4 sweeps."""
+        psi = _make_qn_psi(self.N, self.N_UP, seed=0, dtype=complex)
+        from DMRG.dmrg_engine import DMRGEngine
+        eng = DMRGEngine(psi, self.H_mpo)
+        for md in [8, 16]:
+            eng.sweep(max_dim=md, cutoff=1e-10)
+        E_before = self._measure_energy(psi)
+
+        tdvp = TDVPEngine(psi, self.H_mpo)
+        for _ in range(4):
+            tdvp.sweep(dt=1j * 0.05, num_center=1)
+        E_after = self._measure_energy(psi)
+
+        self.assertAlmostEqual(E_after, E_before, delta=self.ATOL)
+
+    def test_2site_energy_conserved(self):
+        """Real-time 2-site QN TDVP conserves <H> across 4 sweeps."""
+        psi = _make_qn_psi(self.N, self.N_UP, seed=0, dtype=complex)
+        from DMRG.dmrg_engine import DMRGEngine
+        eng = DMRGEngine(psi, self.H_mpo)
+        for md in [8, 16]:
+            eng.sweep(max_dim=md, cutoff=1e-10)
+        E_before = self._measure_energy(psi)
+
+        tdvp = TDVPEngine(psi, self.H_mpo)
+        for _ in range(4):
+            tdvp.sweep(dt=1j * 0.05, max_dim=16, cutoff=1e-12, num_center=2)
+        E_after = self._measure_energy(psi)
+
+        self.assertAlmostEqual(E_after, E_before, delta=self.ATOL)
+
+
+# ---------------------------------------------------------------------------
+# 13. QN imaginary-time convergence to ground state
+# ---------------------------------------------------------------------------
+
+@unittest.skipIf(cytnx is None, "cytnx not available")
+class TestTDVPImaginaryTimeQN(unittest.TestCase):
+    """Imaginary-time QN TDVP must converge to E0."""
+
+    N     = 4
+    N_UP  = 2
+    ATOL  = 0.02
+
+    @classmethod
+    def setUpClass(cls):
+        cls.E0_exact = _exact_energies(cls.N, num=1)[0]
+        cls.H_mpo    = _qn_heisenberg_mpo(cls.N)
+
+    def _measure_energy(self, psi) -> float:
+        """<psi|H|psi> via Rayleigh quotient at site 0."""
+        from MPS.linalg import lanczos
+        psi.move_center(0)
+        op_env = OperatorEnv(psi, psi, self.H_mpo, init_center=0)
+        op_env.update_envs(0, 0)
+        effH = EffOperator(op_env[-1], op_env[1], self.H_mpo[0])
+        phi  = psi.make_phi(0, 1)
+        E, _ = lanczos(effH.apply, phi, k=1)
+        return E
+
+    def test_2site_imagtime_convergence(self):
+        """2-site imaginary-time QN TDVP converges to exact ground-state energy."""
+        psi    = _make_qn_psi(self.N, self.N_UP, seed=0)
+        engine = TDVPEngine(psi, self.H_mpo)
+        for _ in range(50):
+            engine.sweep(dt=0.1, max_dim=16, cutoff=1e-10, num_center=2)
+        E = self._measure_energy(psi)
+        self.assertAlmostEqual(E, self.E0_exact, delta=self.ATOL)
+
+    def test_1site_imagtime_converges_from_good_start(self):
+        """1-site imaginary-time QN TDVP refines a warm-started state to E0."""
+        psi    = _make_qn_psi(self.N, self.N_UP, seed=0)
+        engine = TDVPEngine(psi, self.H_mpo)
+        # Warm up with 2-site (tau=4)
+        for _ in range(40):
+            engine.sweep(dt=0.1, max_dim=16, cutoff=1e-10, num_center=2)
+        # Refine with 1-site (tau=2)
+        for _ in range(20):
+            engine.sweep(dt=0.1, num_center=1)
+        E = self._measure_energy(psi)
+        self.assertAlmostEqual(E, self.E0_exact, delta=self.ATOL)
+
+    def test_imagtime_energy_monotone(self):
+        """Imaginary-time QN energy must be non-increasing sweep by sweep."""
+        psi    = _make_qn_psi(self.N, self.N_UP, seed=3)
         engine = TDVPEngine(psi, self.H_mpo)
         energies = []
         for _ in range(5):

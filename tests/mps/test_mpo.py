@@ -12,15 +12,15 @@ from pathlib import Path
 
 import numpy as np
 
-THIS_DIR = Path(__file__).resolve().parent
-PKG_ROOT = THIS_DIR.parent.parent.parent
-if str(PKG_ROOT) not in sys.path:
-    sys.path.insert(0, str(PKG_ROOT))
-
 try:
     import cytnx
 except ImportError:
     cytnx = None
+
+THIS_DIR = Path(__file__).resolve().parent
+PKG_ROOT = THIS_DIR.parent.parent.parent
+if str(PKG_ROOT) not in sys.path:
+    sys.path.insert(0, str(PKG_ROOT))
 
 if cytnx is not None:
     from MPS.mpo import MPO, MPO_SITE_LABELS, assert_mpo_site_labels

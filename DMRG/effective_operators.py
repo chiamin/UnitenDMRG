@@ -30,6 +30,7 @@ from __future__ import annotations
 import cytnx
 
 from MPS.mps import MPS
+from DMRG.environment import assert_left_env_dirs, assert_right_env_dirs
 
 
 # ---------------------------------------------------------------------------
@@ -44,17 +45,24 @@ class EffVector:
     |Φ_0⟩ is pre-computed in `__init__` by contracting the left/right
     overlap environments with the reference site tensors.
 
+    `self.tensor` stores |Φ_0⟩ in ket form.  `inner(phi)` applies
+    `.Dagger()` to convert it to bra ⟨Φ_0| before contracting with phi.
+
     Parameters
     ----------
     L : UniTensor
         Left overlap environment, labels `["dn", "up"]`.
-        Typically `VectorEnv[p-1]`.
+        "dn" = ket (ortho/reference state) virtual bond,
+        "up" = bra (psi, Daggered) virtual bond.
+        Typically `VectorEnv[p-1]` where VectorEnv(ortho, psi).
     R : UniTensor
         Right overlap environment, labels `["dn", "up"]`.
+        Same convention as L.
         Typically `VectorEnv[p+n]` where n = number of sites.
     *mps_tensors : UniTensor
-        Site tensors of the reference state |φ⟩, in site order.
+        Site tensors of the reference state (ortho), in site order.
         Labels `["l", "i", "r"]`.  Typically 1 or 2 tensors.
+        These are ket-form tensors that contract on the "dn" side of L/R.
 
     Notes
     -----
@@ -70,6 +78,8 @@ class EffVector:
 
     def __init__(self, L: "cytnx.UniTensor", R: "cytnx.UniTensor",
                  *mps_tensors: "cytnx.UniTensor") -> None:
+        assert_left_env_dirs(L)
+        assert_right_env_dirs(R)
         self.tensor = self._precompute(L, R, mps_tensors)
 
     # ------------------------------------------------------------------
@@ -101,38 +111,41 @@ class EffVector:
     def _precompute(self, L, R, mps_tensors):
         """Contract L + A[0] + … + A[n-1] + R → |Φ_0⟩.
 
-        Diagram (2-site):
+        A[k] are ket-form site tensors from the reference state (mps1/dn side).
+        They contract on the "dn" (ket) side of L and R.
+        The "up" (bra) legs become the free output legs.
 
-          L["dn","up"] ── A0["l"→"up","i"→"i0","r"→"_b0"] ──
-                          A1["l"→"_b0","i"→"i1","r"→"up_r"] ── R["dn","up"]
+        Diagram (1-site, n=1):
 
-          Free indices: L["dn"]="l", i0, i1, R["dn"]="r"
-          Result labels: ["l", "i0", "i1", "r"]
+          L["dn","up"] ── A0["l","i","r"] ── R["dn","up"]
+            contract:  L["dn"]─A0["l"]      A0["r"]─R["dn"]
+            free:      L["up"]→"l"   i→"i0"   R["up"]→"r"
+
+        Result labels: ["l", "i0", …, "i{n-1}", "r"]
         """
         n = len(mps_tensors)
 
         if n == 0:
-            # 0-site: contract L["up"] with R["up"] (shared virtual bond at cut).
-            # L["dn"] → "l" (output bra bond), R["dn"] → "r" (output bra bond).
-            # (rare; mainly for TDVP bond step)
-            tmp  = L.relabels(["dn", "up"], ["l",  "_bond"])
-            tmp2 = R.relabels(["dn", "up"], ["r",  "_bond"])
+            # 0-site: contract L["dn"] with R["dn"] (shared ket virtual bond).
+            # L["up"] → "l", R["up"] → "r" (output bra legs).
+            tmp  = L.relabels(["dn", "up"], ["_bond", "l"])
+            tmp2 = R.relabels(["dn", "up"], ["_bond", "r"])
             return cytnx.Contract(tmp, tmp2)
 
-        # Connect L["up"] → A[0]["l"]
-        tmp = L.relabels(["dn", "up"], ["l", "_up"])
+        # Connect L["dn"] → A[0]["l"]
+        tmp = L.relabels(["dn", "up"], ["_dn", "l"])
         for k, A in enumerate(mps_tensors):
             i_label = f"i{k}"
             if k < n - 1:
                 r_label = f"_b{k}"
             else:
-                r_label = "_up_r"      # will connect to R["up"]
-            l_label = "_up" if k == 0 else f"_b{k-1}"
+                r_label = "_dn_r"      # will connect to R["dn"]
+            l_label = "_dn" if k == 0 else f"_b{k-1}"
             Ak = A.relabels(["l", "i", "r"], [l_label, i_label, r_label])
             tmp = cytnx.Contract(tmp, Ak)
 
-        # Connect last bond → R["up"]
-        tmp2 = R.relabels(["dn", "up"], ["r", "_up_r"])
+        # Connect last bond → R["dn"]
+        tmp2 = R.relabels(["dn", "up"], ["_dn_r", "r"])
         tmp = cytnx.Contract(tmp, tmp2)
         return tmp
 
@@ -161,6 +174,8 @@ class EffOperator:
 
     def __init__(self, L: "cytnx.UniTensor", R: "cytnx.UniTensor",
                  *mpo_tensors: "cytnx.UniTensor") -> None:
+        assert_left_env_dirs(L)
+        assert_right_env_dirs(R)
         self._L = L
         self._R = R
         self._mpo_tensors = list(mpo_tensors)

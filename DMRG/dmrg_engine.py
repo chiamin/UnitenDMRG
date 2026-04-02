@@ -69,8 +69,10 @@ class DMRGEngine:
         self._op_env = OperatorEnv(psi, psi, H, init_center=0)
 
         # One VectorEnv per orthogonal reference state.
+        # VectorEnv(ortho, psi): "dn" = ortho (ket), "up" = psi (bra).
+        # This ensures EffVector produces a ket vector |Φ_0⟩.
         self._vec_envs = [
-            VectorEnv(psi, s, init_center=0)
+            VectorEnv(s, psi, init_center=0)
             for s in self._ortho_states
         ]
 

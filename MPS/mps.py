@@ -18,6 +18,7 @@ Each site is rank 3. Internal order of axes may vary; the label set must be exac
 from __future__ import annotations
 
 import math
+import sys
 import weakref
 from typing import Iterable, Iterator
 
@@ -25,13 +26,13 @@ import numpy as np
 
 import cytnx
 
-from .uniTensor_core import assert_bond_match, qr_by_labels, scalar_from_uniTensor, svd_by_labels
+from .uniTensor_core import assert_bond_match, scalar_from_uniTensor, svd_by_labels
 from .uniTensor_utils import any_complex_tensors, to_numpy_array
 
 MPS_SITE_LABELS = frozenset({"l", "i", "r"})
 
 
-def assert_mps_site_uniTensor_labels(tensor: "cytnx.UniTensor", site: int) -> None:
+def _check_labels(tensor: "cytnx.UniTensor", site: int) -> None:
     """Raise ValueError if `tensor` is not rank-3 or labels are not exactly l, i, r."""
     if len(tensor.shape()) != 3:
         raise ValueError(
@@ -56,7 +57,7 @@ class MPS:
                 raise TypeError(
                     f"Site {i} must be cytnx.UniTensor; got {type(tensor).__name__}."
                 )
-            assert_mps_site_uniTensor_labels(tensor, i)
+            _check_labels(tensor, i)
         # Canonical window [center_left, center_right]:
         # - sites < center_left are expected left-orthonormal
         # - sites > center_right are expected right-orthonormal
@@ -82,7 +83,7 @@ class MPS:
         return self.tensors[site]
 
     def __setitem__(self, site: int, tensor) -> None:
-        """Replace one site; rollback if bonds no longer match.
+        """Replace one site; rollback if validation fails.
 
         After a successful update, all registered Observer callbacks are fired
         with the updated site index.  Dead callbacks (whose owner was garbage
@@ -92,7 +93,6 @@ class MPS:
             raise TypeError(
                 f"Site {site} must be cytnx.UniTensor; got {type(tensor).__name__}."
             )
-        assert_mps_site_uniTensor_labels(tensor, site)
         old_tensor = self.tensors[site]
         old_left = self.center_left
         old_right = self.center_right
@@ -100,7 +100,7 @@ class MPS:
         self.center_left = min(self.center_left, site)
         self.center_right = max(self.center_right, site)
         try:
-            self._validate_bonds()
+            self.check_mps_tensor(site)
         except Exception:
             self.tensors[site] = old_tensor
             self.center_left = old_left
@@ -114,6 +114,37 @@ class MPS:
                 getattr(obj, method_name)(site)
                 live.append((obj_ref, method_name))
         self._callbacks = live
+
+    def set_sites(self, updates: dict[int, "cytnx.UniTensor"]) -> None:
+        """Replace multiple site tensors atomically.
+
+        All tensors are written first, then validated and notified once.
+        This avoids the intermediate bond-mismatch that occurs when
+        updating adjacent sites one at a time via `__setitem__`.
+
+        Parameters
+        ----------
+        updates : dict[int, UniTensor]
+            Mapping from site index to new tensor.
+        """
+        sites = sorted(updates.keys())
+        for site in sites:
+            tensor = updates[site]
+            if not isinstance(tensor, cytnx.UniTensor):
+                raise TypeError(
+                    f"Site {site} must be cytnx.UniTensor; "
+                    f"got {type(tensor).__name__}."
+                )
+            self.tensors[site] = tensor
+
+        for site in sites:
+            self.center_left = min(self.center_left, site)
+            self.center_right = max(self.center_right, site)
+
+        for site in sites:
+            self.check_mps_tensor(site)
+
+        self._notify_sites(*sites)
 
     def register_callback(self, obj, method_name: str = "delete") -> None:
         """Register *obj.method_name* as an Observer callback.
@@ -157,7 +188,63 @@ class MPS:
     def check_site_labels(self) -> None:
         """Assert every site satisfies rank-3 and labels `l`, `i`, `r`."""
         for i, tensor in enumerate(self.tensors):
-            assert_mps_site_uniTensor_labels(tensor, i)
+            _check_labels(tensor, i)
+
+    def check_mps_tensor(self, site: int, tensor: "cytnx.UniTensor" | None = None) -> None:
+        """Validate a tensor as an MPS site tensor at the given position.
+
+        Checks:
+        1. Rank-3 with labels exactly `{l, i, r}`.
+        2. Bond directions: `l` = BD_IN, `i` = BD_IN, `r` = BD_OUT
+           (only for QN/block-form tensors; dense tensors skip this).
+        3. Neighbour bond match: `tensor.bond("l")` must match
+           `self[site-1].bond("r")` (if site > 0), and `tensor.bond("r")`
+           must match `self[site+1].bond("l")` (if site < N-1).
+
+        If `tensor` is None, checks `self.tensors[site]`.
+        """
+        if tensor is None:
+            tensor = self.tensors[site]
+
+        _check_labels(tensor, site)
+
+        # Bond direction check (QN tensors only).
+        if tensor.is_blockform():
+            if tensor.bond("l").type() != cytnx.bondType.BD_KET:
+                raise ValueError(
+                    f"Site {site} bond \"l\" must be BD_IN; "
+                    f"got {tensor.bond('l').type()}."
+                )
+            if tensor.bond("i").type() != cytnx.bondType.BD_KET:
+                raise ValueError(
+                    f"Site {site} bond \"i\" must be BD_IN; "
+                    f"got {tensor.bond('i').type()}."
+                )
+            if tensor.bond("r").type() != cytnx.bondType.BD_BRA:
+                raise ValueError(
+                    f"Site {site} bond \"r\" must be BD_OUT; "
+                    f"got {tensor.bond('r').type()}."
+                )
+
+        # Neighbour bond match.
+        if site > 0:
+            try:
+                assert_bond_match(
+                    self.tensors[site - 1].bond("r"), tensor.bond("l")
+                )
+            except ValueError:
+                raise ValueError(
+                    f"Bond mismatch between sites {site - 1} and {site}."
+                )
+        if site < len(self) - 1:
+            try:
+                assert_bond_match(
+                    tensor.bond("r"), self.tensors[site + 1].bond("l")
+                )
+            except ValueError:
+                raise ValueError(
+                    f"Bond mismatch between sites {site} and {site + 1}."
+                )
 
     @property
     def phys_dims(self) -> list[int]:
@@ -222,7 +309,7 @@ class MPS:
         nrm = self.norm()
         if nrm < 1e-14:
             raise ValueError("Cannot normalize a zero MPS.")
-        self.tensors[self.center] = self.tensors[self.center] * (1.0 / nrm)
+        self[self.center] = self.tensors[self.center] * (1.0 / nrm)
         return self
 
     def move_center(self, site: int) -> "MPS":
@@ -239,10 +326,10 @@ class MPS:
             self.orthogonalize()
 
         while self.center_left < site:
-            self._shift_center_right_qr(self.center_left)
+            self._shift_center_right(self.center_left)
 
         while self.center_left > site:
-            self._shift_center_left_qr(self.center_left)
+            self._shift_center_left(self.center_left)
         return self
 
     def orthogonalize(self, center: int | None = None) -> "MPS":
@@ -258,7 +345,7 @@ class MPS:
             raise IndexError(f"Center site {center} is outside [0, {len(self) - 1}].")
 
         for site in range(self.center_right, self.center_left, -1):
-            self._shift_center_left_qr(site)
+            self._shift_center_left(site)
         self._validate_bonds()
 
         if center is not None and self.center_left != center:
@@ -294,47 +381,62 @@ class MPS:
                         f"(required for sites > center_right={self.center_right})."
                     )
 
-    def _shift_center_right_qr(self, site: int) -> None:
-        """One QR step that moves the orthogonality center from `site` to `site + 1`."""
-        q, r = qr_by_labels(self.tensors[site], row_labels=["l", "i"], aux_label="nr")
-        q.relabel_("nr", "r")
-        r.relabel_("r", "l")
-        right_new = cytnx.Contract(r, self.tensors[site + 1])
-        right_new.relabel_("nr", "l")
+    def _shift_center_right(self, site: int) -> None:
+        """One SVD step that moves the orthogonality center from `site` to `site + 1`.
 
-        self.tensors[site] = q
-        self.tensors[site + 1] = right_new
+        SVD with row=["l","i"] (all BD_IN), absorb singular values right.
+        """
+        u, vt, _ = svd_by_labels(
+            self.tensors[site],
+            row_labels=["l", "i"], col_labels=["r"],
+            absorb="right", aux_label="_s",
+        )
+
+        # u → new A[site]: (l, i, _s) → (l, i, r)
+        u.relabels_(["l", "i", "_s"], ["l", "i", "r"])
+
+        # vt (with s absorbed) → (_s, r), contract into A[site+1]
+        vt.relabel_("r", "l")
+        right_new = cytnx.Contract(vt, self.tensors[site + 1])
+        right_new.relabel_("_s", "l")
+
+        self.set_sites({site: u, site + 1: right_new})
         self.center_left = site + 1
         self.center_right = site + 1
 
-    def _shift_center_left_qr(self, site: int) -> None:
-        """One QR step that moves the orthogonality center from `site` to `site - 1`."""
-        q, r = qr_by_labels(self.tensors[site], row_labels=["i", "r"], aux_label="nr")
-        q.permute_(["nr", "i", "r"])
-        q.set_labels(["l", "i", "r"])
-        q.set_rowrank_(2)
+    def _shift_center_left(self, site: int) -> None:
+        """One SVD step that moves the orthogonality center from `site` to `site - 1`.
 
-        r.permute_(["l", "nr"])
-        r.set_labels(["r", "nr"])
-        left_new = cytnx.Contract(self.tensors[site - 1], r)
-        left_new.relabel_("nr", "r")
+        SVD with row=["l"] (all BD_IN), absorb singular values left.
+        """
+        u, vt, _ = svd_by_labels(
+            self.tensors[site],
+            row_labels=["l"], col_labels=["i", "r"],
+            absorb="left", aux_label="_s",
+        )
 
-        self.tensors[site - 1] = left_new
-        self.tensors[site] = q
+        # vt → new A[site]: (_s, i, r) → (l, i, r)
+        vt.relabels_(["_s", "i", "r"], ["l", "i", "r"])
+
+        # u (with s absorbed) → (l, _s), contract into A[site-1]
+        u.permute_(["_s", "l"])
+        u.set_labels(["_sr", "r"])
+        left_new = cytnx.Contract(self.tensors[site - 1], u)
+        left_new.relabel_("_sr", "r")
+
+        self.set_sites({site - 1: left_new, site: vt})
         self.center_left = site - 1
         self.center_right = site - 1
 
     def _validate_bonds(self) -> None:
-        """Labels, open boundaries, neighbor bond match, and center window range."""
-        self.check_site_labels()
+        """Full MPS validation: labels, directions, boundaries, neighbours, center."""
+        for site in range(len(self)):
+            self.check_mps_tensor(site)
+
         if self.tensors[0].bond("l").dim() != 1:
             raise ValueError("First tensor left bond must be 1.")
         if self.tensors[-1].bond("r").dim() != 1:
             raise ValueError("Last tensor right bond must be 1.")
-
-        for site in range(len(self.tensors) - 1):
-            if self.tensors[site].bond("r").dim() != self.tensors[site + 1].bond("l").dim():
-                raise ValueError(f"Bond mismatch between sites {site} and {site + 1}.")
 
         if not 0 <= self.center_left <= self.center_right < len(self):
             raise ValueError(
@@ -348,15 +450,9 @@ class MPS:
         if len(self) != len(other):
             raise ValueError("Both MPS objects must have the same number of sites.")
         for site, (tensor_self, tensor_other) in enumerate(zip(self.tensors, other.tensors)):
-            b1 = tensor_self.bond("i")
-            b2 = tensor_other.bond("i")
-            mismatch = (
-                b1.dim() != b2.dim()
-                or b1.Nsym() != b2.Nsym()
-                or b1.qnums() != b2.qnums()
-                or b1.getDegeneracies() != b2.getDegeneracies()
-            )
-            if mismatch:
+            try:
+                assert_bond_match(tensor_self.bond("i"), tensor_other.bond("i"))
+            except ValueError:
                 raise ValueError(f"Physical bond mismatch at site {site}.")
 
     # ------------------------------------------------------------------
@@ -473,7 +569,7 @@ class MPS:
             )
 
     def _update_1site(self, p, phi, max_dim, cutoff, absorb):
-        """1-site update: QR (no truncation) or SVD (with truncation).
+        """1-site update via SVD.
 
         absorb='right':                absorb='left':
 
@@ -483,71 +579,49 @@ class MPS:
           l   i    r                   l               i    r
         """
         i0 = MPS._phi_label(0)
-        use_svd = (max_dim is not None) or (cutoff != 0.0)
         discarded = 0.0
 
         if absorb == "right":
             # Left-canonicalise site p; absorb residual into p+1.
-            if use_svd:
-                A, Vt, discarded = svd_by_labels(
-                    phi,
-                    row_labels=["l", i0], col_labels=["r"],
-                    absorb="right",
-                    dim=max_dim if max_dim is not None else sys.maxsize,
-                    cutoff=cutoff, aux_label="_s",
-                )
-                # Vt: (_s, r) → absorb into psi[p+1]
-                Vt.relabel_("r", "l")
-                next_new = cytnx.Contract(Vt, self.tensors[p + 1])
-                next_new.relabel_("_s", "l")
-            else:
-                A, Vt = qr_by_labels(phi, row_labels=["l", i0], aux_label="_s")
-                # A: (l, i0, _s),  Vt: (_s, r) → absorb into psi[p+1]
-                Vt.relabel_("r", "l")
-                next_new = cytnx.Contract(Vt, self.tensors[p + 1])
-                next_new.relabel_("_s", "l")
+            A, Vt, discarded = svd_by_labels(
+                phi,
+                row_labels=["l", i0], col_labels=["r"],
+                absorb="right",
+                dim=max_dim if max_dim is not None else sys.maxsize,
+                cutoff=cutoff, aux_label="_s",
+            )
+            # Vt: (_s, r) → absorb into psi[p+1]
+            Vt.relabel_("r", "l")
+            next_new = cytnx.Contract(Vt, self.tensors[p + 1])
+            next_new.relabel_("_s", "l")
 
             A.relabels_(["l", i0, "_s"], ["l", "i", "r"])
-            self.tensors[p]     = A
-            self.tensors[p + 1] = next_new
+            self.set_sites({p: A, p + 1: next_new})
             self.center_left  = p + 1
             self.center_right = p + 1
-            self._validate_bonds()
-            self._notify_sites(p, p + 1)
 
         else:  # absorb == "left"
             # Right-canonicalise site p; absorb residual into p-1.
-            if use_svd:
-                US, A, discarded = svd_by_labels(
-                    phi,
-                    row_labels=["l"], col_labels=[i0, "r"],
-                    absorb="left",
-                    dim=max_dim if max_dim is not None else sys.maxsize,
-                    cutoff=cutoff, aux_label="_s",
-                )
-                # A (=Vt): (_s, i0, r) → set as psi[p]
-                # US: (l, _s) → absorb into psi[p-1]
-                US.permute_(["_s", "l"])
-                US.set_labels(["_sr", "r"])
-                prev_new = cytnx.Contract(self.tensors[p - 1], US)
-                prev_new.relabel_("_sr", "r")
-            else:
-                A, US = qr_by_labels(phi, row_labels=[i0, "r"], aux_label="_s")
-                # A: (i0, r, _s),  US (=R): (_s, l) → absorb into psi[p-1]
-                US.permute_(["l", "_s"])
-                US.set_labels(["r", "_sr"])
-                prev_new = cytnx.Contract(self.tensors[p - 1], US)
-                prev_new.relabel_("_sr", "r")
+            US, A, discarded = svd_by_labels(
+                phi,
+                row_labels=["l"], col_labels=[i0, "r"],
+                absorb="left",
+                dim=max_dim if max_dim is not None else sys.maxsize,
+                cutoff=cutoff, aux_label="_s",
+            )
+            # A (=Vt): (_s, i0, r) → set as psi[p]
+            # US: (l, _s) → absorb into psi[p-1]
+            US.permute_(["_s", "l"])
+            US.set_labels(["_sr", "r"])
+            prev_new = cytnx.Contract(self.tensors[p - 1], US)
+            prev_new.relabel_("_sr", "r")
 
             A.permute_(["_s", i0, "r"])
             A.set_labels(["l", "i", "r"])
             A.set_rowrank_(2)
-            self.tensors[p - 1] = prev_new
-            self.tensors[p]     = A
+            self.set_sites({p - 1: prev_new, p: A})
             self.center_left  = p - 1
             self.center_right = p - 1
-            self._validate_bonds()
-            self._notify_sites(p - 1, p)
 
         return discarded
 
@@ -577,13 +651,10 @@ class MPS:
         A0.relabels_(["l", i0, "_s"], ["l", "i", "r"])
         A1.relabels_(["_s", i1, "r"], ["l", "i", "r"])
 
-        self.tensors[p]     = A0
-        self.tensors[p + 1] = A1
+        self.set_sites({p: A0, p + 1: A1})
         center = p + 1 if absorb == "right" else p
         self.center_left  = center
         self.center_right = center
-        self._validate_bonds()
-        self._notify_sites(p, p + 1)
         return discarded
 
     def _notify_sites(self, *sites: int) -> None:

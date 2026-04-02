@@ -44,6 +44,48 @@ from MPS.uniTensor_utils import any_complex_tensors
 
 
 # ---------------------------------------------------------------------------
+# Bond direction convention for environment tensors
+# ---------------------------------------------------------------------------
+#
+# Convention (derived from MPS bond directions l=BD_IN, r=BD_OUT):
+#
+#   Left env  (L):  "dn" = BD_OUT,  "up" = BD_IN
+#   Right env (R):  "dn" = BD_IN,   "up" = BD_OUT
+#
+# "dn" carries the ket (mps1) virtual bond.
+# "up" carries the bra (mps2, Daggered) virtual bond.
+
+def assert_left_env_dirs(env: "cytnx.UniTensor") -> None:
+    """Assert that a left environment tensor has the expected bond directions.
+
+    Skipped for dense (non-QN) tensors where bond direction is irrelevant.
+    """
+    if not env.is_blockform():
+        return
+    assert env.bond("dn").type() == cytnx.bondType.BD_BRA, (
+        f'Left env "dn" must be BD_OUT, got {env.bond("dn").type()}'
+    )
+    assert env.bond("up").type() == cytnx.bondType.BD_KET, (
+        f'Left env "up" must be BD_IN, got {env.bond("up").type()}'
+    )
+
+
+def assert_right_env_dirs(env: "cytnx.UniTensor") -> None:
+    """Assert that a right environment tensor has the expected bond directions.
+
+    Skipped for dense (non-QN) tensors where bond direction is irrelevant.
+    """
+    if not env.is_blockform():
+        return
+    assert env.bond("dn").type() == cytnx.bondType.BD_KET, (
+        f'Right env "dn" must be BD_IN, got {env.bond("dn").type()}'
+    )
+    assert env.bond("up").type() == cytnx.bondType.BD_BRA, (
+        f'Right env "up" must be BD_OUT, got {env.bond("up").type()}'
+    )
+
+
+# ---------------------------------------------------------------------------
 # Base class
 # ---------------------------------------------------------------------------
 
@@ -308,6 +350,8 @@ class OperatorEnv(LREnv):
             [b_mid, b_dn, b_up], labels=["mid", "dn", "up"], dtype=ut_dtype
         )
         R0.at([0, 0, 0]).value = 1.0
+        assert_left_env_dirs(L0)
+        assert_right_env_dirs(R0)
         return L0, R0
 
     def _grow_left(self, p: int, prev_env: "cytnx.UniTensor") -> "cytnx.UniTensor":
@@ -415,6 +459,8 @@ class VectorEnv(LREnv):
         r2 = mps2[-1].bond("r")
         R0 = cytnx.UniTensor([r1, r2], labels=["dn", "up"], dtype=ut_dtype)
         R0.at([0, 0]).value = 1.0
+        assert_left_env_dirs(L0)
+        assert_right_env_dirs(R0)
         return L0, R0
 
     def _grow_left(self, p: int, prev_env: "cytnx.UniTensor") -> "cytnx.UniTensor":
