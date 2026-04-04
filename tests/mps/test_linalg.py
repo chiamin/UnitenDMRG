@@ -30,7 +30,7 @@ if str(PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(PKG_ROOT))
 
 if cytnx is not None:
-    from MPS.linalg import inner, lanczos
+    from linalg import inner, lanczos, davidson
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +311,195 @@ class TestLanczosComplex(unittest.TestCase):
         rng = np.random.default_rng(19)
         v0 = _vec_complex(rng.standard_normal(n) + 1j * rng.standard_normal(n))
         E0, psi = lanczos(apply, v0, k=n)
+        H_psi_np = apply(psi).get_block().numpy().ravel()
+        psi_np   = psi.get_block().numpy().ravel()
+        np.testing.assert_allclose(H_psi_np, E0 * psi_np, atol=1e-6)
+
+
+# ===========================================================================
+# 5. davidson (real, no preconditioner)
+# ===========================================================================
+
+@unittest.skipIf(cytnx is None, "cytnx not available")
+class TestDavidsonRealNoPrecond(unittest.TestCase):
+    """Davidson without preconditioning behaves like a subspace method."""
+
+    def _ground_state_numpy(self, H_np):
+        evals, evecs = np.linalg.eigh(H_np)
+        return float(evals[0].real), evecs[:, 0]
+
+    def test_energy_matches_numpy(self):
+        """Davidson ground-state energy matches numpy (real symmetric H)."""
+        n = 10
+        H_np = _random_symmetric(n, seed=20)
+        apply = _matvec_func(H_np, _vec_real)
+        rng = np.random.default_rng(30)
+        v0 = _vec_real(rng.standard_normal(n))
+
+        E0_dav, _ = davidson(apply, v0, k=n)
+        E0_np, _ = self._ground_state_numpy(H_np)
+        self.assertAlmostEqual(E0_dav, E0_np, places=8)
+
+    def test_eigenvector_is_normalised(self):
+        """Returned eigenvector has unit norm."""
+        n = 8
+        H_np = _random_symmetric(n, seed=21)
+        apply = _matvec_func(H_np, _vec_real)
+        v0 = _vec_real(np.ones(n, dtype=float))
+
+        _, psi = davidson(apply, v0, k=n)
+        self.assertAlmostEqual(psi.Norm().item(), 1.0, places=8)
+
+    def test_eigenvector_satisfies_eigenvalue_equation(self):
+        """H|psi> ~ E0 * |psi>."""
+        n = 8
+        H_np = _random_symmetric(n, seed=22)
+        apply = _matvec_func(H_np, _vec_real)
+        rng = np.random.default_rng(40)
+        v0 = _vec_real(rng.standard_normal(n))
+
+        E0, psi = davidson(apply, v0, k=n)
+        H_psi_np = apply(psi).get_block().numpy().ravel()
+        psi_np   = psi.get_block().numpy().ravel()
+        np.testing.assert_allclose(H_psi_np, E0 * psi_np, atol=1e-6)
+
+
+# ===========================================================================
+# 6. davidson (real, with Jacobi preconditioner)
+# ===========================================================================
+
+@unittest.skipIf(cytnx is None, "cytnx not available")
+class TestDavidsonRealPrecond(unittest.TestCase):
+    """Davidson with diagonal (Jacobi) preconditioner."""
+
+    def _jacobi_precond(self, H_diag):
+        """Return a Jacobi preconditioner callable for rank-1 UniTensors."""
+        def _precond(r, theta):
+            r_np = r.get_block().numpy().ravel()
+            denom = theta - H_diag
+            # Avoid division by zero: skip near-zero denominators
+            safe = np.where(np.abs(denom) > 1e-12, denom, 1.0)
+            t_np = r_np / safe
+            return _vec_real(t_np)
+        return _precond
+
+    def test_energy_matches_numpy(self):
+        """Preconditioned Davidson finds correct energy."""
+        n = 10
+        H_np = _random_symmetric(n, seed=25)
+        H_diag = np.diag(H_np)
+        apply = _matvec_func(H_np, _vec_real)
+        precond = self._jacobi_precond(H_diag)
+        rng = np.random.default_rng(35)
+        v0 = _vec_real(rng.standard_normal(n))
+
+        E0_dav, _ = davidson(apply, v0, precond=precond, k=n)
+        evals = np.linalg.eigh(H_np)[0]
+        self.assertAlmostEqual(E0_dav, float(evals[0]), places=8)
+
+    def test_fast_convergence_with_good_initial_guess(self):
+        """With a near-eigenstate initial guess (typical in DMRG sweeps),
+        preconditioned Davidson converges in fewer iterations than
+        unpreconditioned (verified by checking a small k suffices)."""
+        n = 15
+        # Well-separated eigenvalues: 0, 10, 20, ... so Jacobi preconditioner
+        # has good denominators (theta - H_ii != 0 for i > 0).
+        rng = np.random.default_rng(50)
+        off = rng.standard_normal((n, n)) * 0.1
+        H_np = np.diag(np.arange(0.0, n * 10.0, 10.0)) + (off + off.T) / 2
+        H_diag = np.diag(H_np)
+        evals, evecs = np.linalg.eigh(H_np)
+
+        apply = _matvec_func(H_np, _vec_real)
+        precond = self._jacobi_precond(H_diag)
+
+        # Start near the true ground state (perturbed by 5% noise)
+        v0_np = evecs[:, 0] + 0.05 * rng.standard_normal(n)
+        v0 = _vec_real(v0_np)
+
+        # With k much smaller than n, should converge
+        E0_dav, psi = davidson(apply, v0, precond=precond, k=8)
+        self.assertAlmostEqual(E0_dav, float(evals[0]), places=6)
+
+    def test_eigenvector_satisfies_eigenvalue_equation(self):
+        """H|psi> ~ E0 * |psi> with preconditioning."""
+        n = 10
+        H_np = _random_symmetric(n, seed=26)
+        H_diag = np.diag(H_np)
+        apply = _matvec_func(H_np, _vec_real)
+        precond = self._jacobi_precond(H_diag)
+        rng = np.random.default_rng(36)
+        v0 = _vec_real(rng.standard_normal(n))
+
+        E0, psi = davidson(apply, v0, precond=precond, k=n)
+        H_psi_np = apply(psi).get_block().numpy().ravel()
+        psi_np   = psi.get_block().numpy().ravel()
+        np.testing.assert_allclose(H_psi_np, E0 * psi_np, atol=1e-6)
+
+
+# ===========================================================================
+# 7. davidson (complex)
+# ===========================================================================
+
+@unittest.skipIf(cytnx is None, "cytnx not available")
+class TestDavidsonComplex(unittest.TestCase):
+    """Davidson correctness for complex-Hermitian operators."""
+
+    def _jacobi_precond_complex(self, H_diag):
+        def _precond(r, theta):
+            r_np = r.get_block().numpy().ravel()
+            denom = theta - H_diag
+            safe = np.where(np.abs(denom) > 1e-12, denom, 1.0)
+            t_np = r_np / safe
+            return _vec_complex(t_np)
+        return _precond
+
+    def test_energy_matches_numpy(self):
+        """Davidson ground-state energy matches numpy (complex Hermitian H)."""
+        n = 10
+        H_np = _random_hermitian(n, seed=30)
+        apply = _matvec_func(H_np, _vec_complex)
+        rng = np.random.default_rng(45)
+        v0 = _vec_complex(rng.standard_normal(n) + 1j * rng.standard_normal(n))
+
+        E0_dav, _ = davidson(apply, v0, k=n)
+        evals = np.linalg.eigh(H_np)[0]
+        self.assertAlmostEqual(E0_dav, float(evals[0]), places=8)
+
+    def test_eigenvector_is_normalised(self):
+        """Returned eigenvector has unit norm."""
+        n = 8
+        H_np = _random_hermitian(n, seed=31)
+        apply = _matvec_func(H_np, _vec_complex)
+        rng = np.random.default_rng(46)
+        v0 = _vec_complex(rng.standard_normal(n) + 1j * rng.standard_normal(n))
+
+        _, psi = davidson(apply, v0, k=n)
+        self.assertAlmostEqual(psi.Norm().item(), 1.0, places=8)
+
+    def test_with_preconditioner(self):
+        """Complex Davidson with Jacobi preconditioner."""
+        n = 10
+        H_np = _random_hermitian(n, seed=32)
+        H_diag = np.diag(H_np).real
+        apply = _matvec_func(H_np, _vec_complex)
+        precond = self._jacobi_precond_complex(H_diag)
+        rng = np.random.default_rng(47)
+        v0 = _vec_complex(rng.standard_normal(n) + 1j * rng.standard_normal(n))
+
+        E0_dav, psi = davidson(apply, v0, precond=precond, k=n)
+        evals = np.linalg.eigh(H_np)[0]
+        self.assertAlmostEqual(E0_dav, float(evals[0]), places=8)
+
+    def test_eigenvector_satisfies_eigenvalue_equation(self):
+        """H|psi> ~ E0 * |psi> for complex Hermitian H."""
+        n = 8
+        H_np = _random_hermitian(n, seed=33)
+        apply = _matvec_func(H_np, _vec_complex)
+        rng = np.random.default_rng(48)
+        v0 = _vec_complex(rng.standard_normal(n) + 1j * rng.standard_normal(n))
+
+        E0, psi = davidson(apply, v0, k=n)
         H_psi_np = apply(psi).get_block().numpy().ravel()
         psi_np   = psi.get_block().numpy().ravel()
         np.testing.assert_allclose(H_psi_np, E0 * psi_np, atol=1e-6)

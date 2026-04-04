@@ -1,7 +1,7 @@
 """Unit tests for the MPO module.
 
 Coverage:
-- MPO: API, label validation, bond checks, endpoint dim=1 enforcement, compression
+- MPO: API, label validation, bond checks, endpoint dim=1 enforcement
 
 Tests are skipped automatically if `cytnx` is unavailable.
 """
@@ -24,7 +24,7 @@ if str(PKG_ROOT) not in sys.path:
 
 if cytnx is not None:
     from MPS.mpo import MPO, MPO_SITE_LABELS, assert_mpo_site_labels
-    from MPS.uniTensor_utils import to_numpy_array
+    from unitensor.utils import to_numpy_array
 else:
     cytnx = None
     MPO = object
@@ -215,51 +215,6 @@ class TestMPOProperties(unittest.TestCase):
             tensors.append(u)
         mpo_c = MPO(tensors)
         self.assertTrue(mpo_c.is_complex)
-
-
-@unittest.skipIf(cytnx is None, "cytnx is required for MPO tests")
-class TestMPOCompressBond(unittest.TestCase):
-    """Tests for MPO.compress_bond."""
-
-    def test_compress_bond_reduces_dim(self) -> None:
-        mpo = _make_mpo(num_sites=3, d=2, D=4)
-        kept, dw = mpo.compress_bond(0, max_dim=2, cutoff=0.0, absorb="right")
-        self.assertLessEqual(kept, 2)
-        self.assertGreaterEqual(dw, 0.0)
-
-    def test_compress_bond_neighbor_dims_match(self) -> None:
-        mpo = _make_mpo(num_sites=3, d=2, D=4)
-        mpo.compress_bond(0, max_dim=2, cutoff=0.0)
-        self.assertEqual(mpo[0].bond("r").dim(), mpo[1].bond("l").dim())
-
-    def test_compress_bond_preserves_site_labels(self) -> None:
-        mpo = _make_mpo(num_sites=3, d=2, D=4)
-        mpo.compress_bond(1, max_dim=2, cutoff=0.0)
-        self.assertEqual(set(mpo[1].labels()), {"l", "ip", "i", "r"})
-        self.assertEqual(set(mpo[2].labels()), {"l", "ip", "i", "r"})
-
-    def test_compress_bond_absorb_left(self) -> None:
-        mpo = _make_mpo(num_sites=3, d=2, D=4)
-        kept, dw = mpo.compress_bond(0, max_dim=2, cutoff=0.0, absorb="left")
-        self.assertLessEqual(kept, 2)
-        self.assertEqual(mpo[0].bond("r").dim(), mpo[1].bond("l").dim())
-
-    def test_compress_bond_out_of_range(self) -> None:
-        mpo = _make_mpo(num_sites=3)
-        with self.assertRaises(IndexError):
-            mpo.compress_bond(-1, max_dim=2)
-        with self.assertRaises(IndexError):
-            mpo.compress_bond(len(mpo) - 1, max_dim=2)
-
-    def test_compress_bond_invalid_absorb(self) -> None:
-        mpo = _make_mpo()
-        with self.assertRaises(ValueError):
-            mpo.compress_bond(0, max_dim=2, absorb="both")
-
-    def test_compress_bond_zero_max_dim_raises(self) -> None:
-        mpo = _make_mpo()
-        with self.assertRaises(ValueError):
-            mpo.compress_bond(0, max_dim=0)
 
 
 if __name__ == "__main__":

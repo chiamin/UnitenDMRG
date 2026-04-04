@@ -24,7 +24,7 @@ from __future__ import annotations
 import cytnx
 
 from MPS.mps import MPS
-from MPS.linalg import lanczos
+from linalg import davidson
 from DMRG.environment import OperatorEnv, VectorEnv
 from DMRG.effective_operators import EffOperator, EffVector
 
@@ -167,9 +167,9 @@ class DMRGEngine:
             )
             effH.add_term(eff_vec, weight)
 
-        # Merge site tensors into φ, optimise with Lanczos, split back.
+        # Merge site tensors into φ, optimise with Davidson, split back.
         phi = psi.make_phi(p, num_center)
-        E, phi = lanczos(effH.apply, phi)
+        E, phi = davidson(effH.apply, phi)
         trunc = psi.update_sites(p, phi, max_dim=max_dim, cutoff=cutoff,
                                  absorb=absorb)
         return float(E), float(trunc)

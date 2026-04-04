@@ -24,8 +24,8 @@ for path in [cwd, cwd.parent]:
 
 from MPS.mps import *
 from MPS.mps_operations import inner
-from MPS.uniTensor_core import *
-from MPS.uniTensor_utils import *
+from unitensor.core import *
+from unitensor.utils import *
 
 
 def section(title: str) -> None:

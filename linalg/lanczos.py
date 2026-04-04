@@ -1,18 +1,4 @@
-"""Type-agnostic linear algebra routines for DMRG and related algorithms.
-
-All routines operate on Cytnx UniTensor vectors, but avoid any numpy array
-conversion in the hot path.  The only assumption is that the vector type
-supports the following operations via duck typing:
-
-    v + w, v - w         : vector addition / subtraction
-    a * v, v * a         : scalar multiplication  (a is a Python scalar)
-    v.clone()            : deep copy
-    v.Norm().item()      : Euclidean norm as a Python float
-    v * 0.               : zero vector of the same structure
-
-The inner product is provided by the module-level `inner` function, which
-is the only UniTensor-specific operation.
-"""
+"""Lanczos eigensolver and Krylov matrix-exponential."""
 
 from __future__ import annotations
 
@@ -22,27 +8,7 @@ import numpy as np
 
 import cytnx
 
-
-# ---------------------------------------------------------------------------
-# Inner product
-# ---------------------------------------------------------------------------
-
-def inner(v1: "cytnx.UniTensor", v2: "cytnx.UniTensor") -> complex:
-    """Compute the inner product <v1|v2> for two UniTensors.
-
-    Both tensors must have identical label sets and compatible bond directions
-    (v1 acts as a bra, v2 as a ket).  Contracts all shared indices and returns
-    a Python scalar.
-
-    Notes
-    -----
-    Dagger() on v1 flips bond directions and complex-conjugates elements so
-    that the result is the standard Hilbert-space inner product.
-    """
-    #
-    #  <v1|v2> :  v1†──O──v2  →  scalar
-    #
-    return cytnx.Contract(v1.Dagger(), v2).item()
+from .inner import inner
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +59,10 @@ def lanczos(apply, v0: "cytnx.UniTensor", k: int = 20) -> tuple:
     return float(evals[0].real), psi
 
 
+# ---------------------------------------------------------------------------
+# Lanczos matrix-exponential
+# ---------------------------------------------------------------------------
+
 def lanczos_expm_multiply(
     apply, v0: "cytnx.UniTensor", dt: complex | float, k: int = 20
 ) -> "cytnx.UniTensor":
@@ -141,6 +111,10 @@ def lanczos_expm_multiply(
     result.set_labels(_labels)
     return result
 
+
+# ---------------------------------------------------------------------------
+# Core Lanczos iteration (shared by lanczos and lanczos_expm_multiply)
+# ---------------------------------------------------------------------------
 
 def _lanczos_iterations(apply, v0: "cytnx.UniTensor", k: int) -> tuple:
     """Core Lanczos iteration: build tridiagonal matrix T and Krylov basis.

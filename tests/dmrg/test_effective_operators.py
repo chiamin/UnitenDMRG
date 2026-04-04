@@ -69,7 +69,7 @@ if cytnx is not None:
     from MPS.auto_mpo import AutoMPO
     from DMRG.environment import OperatorEnv, VectorEnv
     from DMRG.effective_operators import EffVector, EffOperator
-    from MPS.linalg import inner as linalg_inner
+    from linalg import inner as linalg_inner
     from tests.helpers.mps_test_cases import random_u1_sz_mps
 
 

@@ -36,15 +36,15 @@ if cytnx is not None:
     from MPS.mps_operations import expectation, inner, mpo_sum, mps_sum
     from MPS.physical_sites import PhysicalSite
     from MPS.physical_sites.spin_half import spin_half
-    from MPS.uniTensor_core import (
+    from unitensor.core import (
         assert_bond_match,
         direct_sum,
         qr_by_labels,
         scalar_from_uniTensor,
         svd_by_labels,
     )
-    from MPS.uniTensor_utils import print_bond, print_bonds, to_numpy_array, to_uniTensor
-    from MPS.uniTensor_utils import any_complex_tensors, is_complex_tensor
+    from unitensor.utils import print_bond, print_bonds, to_numpy_array, to_uniTensor
+    from unitensor.utils import any_complex_tensors, is_complex_tensor
 else:  # pragma: no cover
     MPS = object
 

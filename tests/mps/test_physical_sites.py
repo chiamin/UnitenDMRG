@@ -15,7 +15,7 @@ except ImportError:
 
 if cytnx is not None:
     from MPS.physical_sites import PhysicalSite, spin_half
-    from MPS.uniTensor_core import bond_qnums_at, _bond_sector_at
+    from unitensor.core import bond_qnums_at, _bond_sector_at
 
 
 SKIP = unittest.skipIf(cytnx is None, "cytnx not available")
@@ -144,17 +144,17 @@ class TestSpinHalf(unittest.TestCase):
 
     def test_delta_qn_dense(self):
         site = spin_half()
-        self.assertEqual(site.op_delta_qn("I"),  0)
-        self.assertEqual(site.op_delta_qn("Sz"), 0)
-        self.assertEqual(site.op_delta_qn("Sp"), 0)
-        self.assertEqual(site.op_delta_qn("Sm"), 0)
+        self.assertEqual(site.op_delta_qn("I"),  [0])
+        self.assertEqual(site.op_delta_qn("Sz"), [0])
+        self.assertEqual(site.op_delta_qn("Sp"), [0])
+        self.assertEqual(site.op_delta_qn("Sm"), [0])
 
     def test_delta_qn_qn(self):
         site = spin_half(qn="Sz")
-        self.assertEqual(site.op_delta_qn("I"),  0)
-        self.assertEqual(site.op_delta_qn("Sz"), 0)
-        self.assertEqual(site.op_delta_qn("Sp"), 1)
-        self.assertEqual(site.op_delta_qn("Sm"), -1)
+        self.assertEqual(site.op_delta_qn("I"),  [0])
+        self.assertEqual(site.op_delta_qn("Sz"), [0])
+        self.assertEqual(site.op_delta_qn("Sp"), [1])
+        self.assertEqual(site.op_delta_qn("Sm"), [-1])
 
     def test_op_missing_raises(self):
         site = spin_half()
@@ -172,7 +172,7 @@ class TestSpinHalf(unittest.TestCase):
 
     def test_derive_delta_qn_mixed_raises(self):
         import numpy as np
-        from MPS.uniTensor_core import derive_delta_qn
+        from unitensor.core import derive_delta_qn
         site = spin_half(qn="Sz")
         Sx = np.array([[0, 0.5], [0.5, 0]])  # mixes delta_qn +1 and -1
         with self.assertRaises(ValueError):
@@ -200,7 +200,7 @@ class TestProductStateDense(unittest.TestCase):
 
     def test_correct_element_set(self):
         import numpy as np
-        from MPS.uniTensor_utils import to_numpy_array
+        from unitensor.utils import to_numpy_array
         psi = self.site.product_state([1, 0])
         # site 0: state=1 -> arr[0,1,0]=1
         arr0 = to_numpy_array(psi[0])

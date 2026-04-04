@@ -73,7 +73,7 @@ if cytnx is not None:
     from tests.helpers.mps_test_cases import random_u1_sz_mps
     from MPS.physical_sites import spin_half
     from MPS.auto_mpo import AutoMPO
-    from MPS.linalg import lanczos_expm_multiply, inner
+    from linalg import lanczos_expm_multiply, inner
     from DMRG.effective_operators import EffOperator
     from DMRG.environment import OperatorEnv
     from TDVP.tdvp_engine import TDVPEngine
@@ -156,7 +156,7 @@ def _energy(psi, H_mpo) -> float:
     Builds OperatorEnv and contracts the full expectation value via Lanczos
     ground-state energy (which equals the Rayleigh quotient for the given psi).
     """
-    from MPS.linalg import lanczos
+    from linalg import lanczos
     psi.move_center(0)
     op_env = OperatorEnv(psi, psi, H_mpo, init_center=0)
     op_env.update_envs(0, 0)
@@ -576,7 +576,7 @@ class TestTDVPEnergyConservation(unittest.TestCase):
         op_env.update_envs(0, 0)
         effH = EffOperator(op_env[-1], op_env[1], self.H_mpo[0])
         phi  = psi.make_phi(0, 1)
-        from MPS.linalg import lanczos
+        from linalg import lanczos
         E, _ = lanczos(effH.apply, phi, k=1)
         return E
 
@@ -632,7 +632,7 @@ class TestTDVPImaginaryTime(unittest.TestCase):
 
     def _measure_energy(self, psi) -> float:
         """<psi|H|psi> via Rayleigh quotient at site 0."""
-        from MPS.linalg import lanczos
+        from linalg import lanczos
         psi.move_center(0)
         op_env = OperatorEnv(psi, psi, self.H_mpo, init_center=0)
         op_env.update_envs(0, 0)
@@ -747,7 +747,7 @@ class TestTDVPEnergyConservationQN(unittest.TestCase):
 
     def _measure_energy(self, psi) -> float:
         """<psi|H|psi> via Rayleigh quotient at site 0."""
-        from MPS.linalg import lanczos
+        from linalg import lanczos
         psi.move_center(0)
         op_env = OperatorEnv(psi, psi, self.H_mpo, init_center=0)
         op_env.update_envs(0, 0)
@@ -808,7 +808,7 @@ class TestTDVPImaginaryTimeQN(unittest.TestCase):
 
     def _measure_energy(self, psi) -> float:
         """<psi|H|psi> via Rayleigh quotient at site 0."""
-        from MPS.linalg import lanczos
+        from linalg import lanczos
         psi.move_center(0)
         op_env = OperatorEnv(psi, psi, self.H_mpo, init_center=0)
         op_env.update_envs(0, 0)

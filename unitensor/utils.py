@@ -1,4 +1,4 @@
-"""Utility helpers for UniTensor-based MPS."""
+"""Utility helpers for UniTensors: type conversions, dtype queries, and diagnostics."""
 
 from __future__ import annotations
 

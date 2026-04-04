@@ -17,7 +17,6 @@ DMRG contractions are constructed by OperatorEnv from the MPS and MPO edge bonds
 
 from __future__ import annotations
 
-import sys
 import weakref
 from typing import Iterable, Iterator
 
@@ -25,8 +24,8 @@ import numpy as np
 
 import cytnx
 
-from .uniTensor_core import assert_bond_match, svd_by_labels
-from .uniTensor_utils import any_complex_tensors
+from unitensor.core import assert_bond_match
+from unitensor.utils import any_complex_tensors
 
 MPO_SITE_LABELS = frozenset({"l", "ip", "i", "r"})
 
@@ -212,61 +211,3 @@ class MPO:
         cloned = [tensor.clone() for tensor in self.tensors]
         return MPO(cloned)
 
-    # ------------------------------------------------------------------
-    # Bond compression
-    # ------------------------------------------------------------------
-
-    def compress_bond(
-        self,
-        bond: int,
-        *,
-        max_dim: int | None = None,
-        cutoff: float = 0.0,
-        absorb: str = "right",
-    ) -> tuple[int, float]:
-        """Compress one MPO virtual bond in place via SVD truncation.
-
-        Merges site tensors at `bond` and `bond + 1`, SVD-truncates the shared
-        virtual bond, and writes the result back.  The row partition used is
-        `["l", "ip1", "i1"]` (rowrank-3 semantics), matching the old
-        `svd_bond_mpo` convention.
-
-        Args:
-            bond: Bond index to compress (0 to num_sites - 2).
-            max_dim: Maximum bond dimension to keep; None means no limit.
-            cutoff: Discard Schmidt components whose normalized rho eigenvalue
-                is below this threshold.
-            absorb: Which side absorbs the singular values ('left' or 'right').
-
-        Returns:
-            Tuple of `(kept_dim, discarded_weight)`.
-        """
-        if not 0 <= bond < len(self) - 1:
-            raise IndexError(f"Bond {bond} is outside [0, {len(self) - 2}].")
-        if absorb not in {"left", "right"}:
-            raise ValueError("absorb must be 'left' or 'right'.")
-
-        keep = sys.maxsize if max_dim is None else max_dim
-        if keep <= 0:
-            raise ValueError("max_dim must be positive.")
-
-        a1 = self.tensors[bond].relabels(["i", "ip", "r"], ["i1", "ip1", "_"])
-        a2 = self.tensors[bond + 1].relabels(["i", "ip", "l"], ["i2", "ip2", "_"])
-        aa = cytnx.Contract(a1, a2)
-        aa.permute_(["l", "ip1", "i1", "ip2", "i2", "r"])
-
-        left_new, right_new, discarded = svd_by_labels(
-            aa,
-            row_labels=["l", "ip1", "i1"],
-            absorb=absorb,
-            dim=keep,
-            cutoff=cutoff,
-            aux_label="aux",
-        )
-        left_new.relabels_(["ip1", "i1", "aux"], ["ip", "i", "r"])
-        right_new.relabels_(["ip2", "i2", "aux"], ["ip", "i", "l"])
-
-        kept_dim = left_new.bond("r").dim()
-        self[bond] = left_new
-        self[bond + 1] = right_new
-        return kept_dim, discarded

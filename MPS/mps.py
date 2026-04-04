@@ -26,8 +26,8 @@ import numpy as np
 
 import cytnx
 
-from .uniTensor_core import assert_bond_match, scalar_from_uniTensor, svd_by_labels
-from .uniTensor_utils import any_complex_tensors, to_numpy_array
+from unitensor.core import assert_bond_match, scalar_from_uniTensor, svd_by_labels
+from unitensor.utils import any_complex_tensors, to_numpy_array
 
 MPS_SITE_LABELS = frozenset({"l", "i", "r"})
 

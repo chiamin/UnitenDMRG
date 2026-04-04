@@ -7,7 +7,7 @@ import numpy as np
 import cytnx
 
 from .site import PhysicalSite
-from ..uniTensor_core import derive_delta_qn
+from unitensor.core import derive_delta_qn
 
 
 def spin_half(qn: str | None = None) -> PhysicalSite:

@@ -1,4 +1,4 @@
-"""Core UniTensor kernels for MPS operations."""
+"""Core UniTensor kernels: decompositions, bond utilities, and QN helpers."""
 
 from __future__ import annotations
 
@@ -280,25 +280,42 @@ def bond_qnums_at(bond: "cytnx.Bond", idx: int) -> list[int]:
     return list(bond.qnums()[sector_idx])
 
 
-def derive_delta_qn(matrix: "np.ndarray", bond: "cytnx.Bond") -> int:
+def normalize_qn(value: int, sym: "cytnx.Symmetry") -> int:
+    """Normalize a QN value to the canonical range for its symmetry type.
+
+    U(1): no normalization (any integer is valid).
+    Zn:   map to {0, 1, ..., n-1} via Python ``% n``.
+    """
+    if sym.stype_str() == "U1":
+        return value
+    n = sym.n()
+    return value % n
+
+
+def derive_delta_qn(matrix: "np.ndarray", bond: "cytnx.Bond") -> list[int]:
     """Derive the QN charge of a pure-charge operator from its matrix and physical bond.
 
-    A pure-charge operator has the same QN(ip) - QN(i) for every nonzero element.
-    Returns 0 for dense (no-QN) bonds.
+    A pure-charge operator has the same QN(ip) - QN(i) for every nonzero
+    element, independently for each symmetry.  Returns a list with one int
+    per symmetry.  Returns [0] for dense (no-QN) bonds.
+
+    For Zn symmetries each component is normalized to {0, ..., n-1}.
 
     Raises:
         ValueError: If the operator mixes different QN charges.
     """
-    if bond.Nsym() == 0:
-        return 0
-    delta = None
+    nsym = bond.Nsym()
+    if nsym == 0:
+        return [0]
+    syms = list(bond.syms())
+    delta: list[int] | None = None
     for ip in range(matrix.shape[0]):
         for i in range(matrix.shape[1]):
             if abs(matrix[ip, i]) > 1e-14:
                 qn_ip = bond_qnums_at(bond, ip)
                 qn_i  = bond_qnums_at(bond, i)
-                # Only support single-symmetry bonds for now
-                d = qn_ip[0] - qn_i[0]
+                d = [normalize_qn(qn_ip[k] - qn_i[k], syms[k])
+                     for k in range(nsym)]
                 if delta is None:
                     delta = d
                 elif delta != d:
@@ -306,7 +323,7 @@ def derive_delta_qn(matrix: "np.ndarray", bond: "cytnx.Bond") -> int:
                         "Operator is not pure-charge: found mixed QN charges "
                         f"{delta} and {d}. Decompose into pure-charge terms first."
                     )
-    return delta if delta is not None else 0
+    return delta if delta is not None else [0] * nsym
 
 
 def _kept_weight(s_ut: "cytnx.UniTensor") -> float:
@@ -320,5 +337,3 @@ def _kept_weight(s_ut: "cytnx.UniTensor") -> float:
         arr = np.diag(block.numpy())
         return float(np.sum(np.abs(arr) ** 2))
     raise ValueError(f"Unexpected singular-value block rank: {len(shape)}")
-
-

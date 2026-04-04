@@ -27,8 +27,8 @@ import sys
 import cytnx
 
 from MPS.mps import MPS
-from MPS.linalg import lanczos_expm_multiply
-from MPS.uniTensor_core import svd_by_labels
+from linalg import lanczos_expm_multiply
+from unitensor.core import svd_by_labels
 from DMRG.environment import OperatorEnv
 from DMRG.effective_operators import EffOperator
 

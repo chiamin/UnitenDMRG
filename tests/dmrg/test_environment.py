@@ -86,7 +86,7 @@ if cytnx is not None:
     from MPS.mpo import MPO
     from MPS.mps_init import random_mps
     from MPS.mps_operations import inner, expectation
-    from MPS.uniTensor_utils import to_numpy_array
+    from unitensor.utils import to_numpy_array
     from MPS.physical_sites.spin_half import spin_half
     from MPS.auto_mpo import AutoMPO
     from DMRG.environment import (

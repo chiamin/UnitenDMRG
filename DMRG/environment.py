@@ -40,7 +40,8 @@ from __future__ import annotations
 
 import cytnx
 
-from MPS.uniTensor_utils import any_complex_tensors
+from unitensor.utils import any_complex_tensors
+from MPS.mpo import MPO
 
 
 # ---------------------------------------------------------------------------
@@ -506,3 +507,137 @@ class VectorEnv(LREnv):
         tmp = cytnx.Contract(E, A1)
         tmp = cytnx.Contract(tmp, A2)
         return tmp  # labels: ["dn", "up"]
+
+
+# ---------------------------------------------------------------------------
+# MPO product environment  Tr[M_fit† · MPO1 · MPO2]
+# ---------------------------------------------------------------------------
+
+class MPOProductEnv(LREnv):
+    """Environment tensors for Tr[fitmpo† · mpo1 · mpo2].
+
+    Used to variationally fit a compressed MPO to the product of two MPOs.
+
+    Environment tensor labels: `["up", "mid", "dn"]`
+        up  : fitmpo (Daggered bra) virtual bond
+        mid : mpo1 virtual bond
+        dn  : mpo2 virtual bond
+
+    Contraction diagram (left-to-right, absorbing site p):
+
+          up ---[A†]--- up'        fitmpo site (Daggered)
+               |ip  |i
+         mid --[W1]-- mid'         mpo1 site
+               |ip  |i
+          dn --[W2]-- dn'          mpo2 site
+
+        Physical contractions:
+            A†.ip ↔ W1.ip      (top)
+            W1.i  ↔ W2.ip      (middle)
+            A†.i  ↔ W2.i       (bottom)
+
+    Parameters
+    ----------
+    mpo1       : MPO — first operator (upper).
+    mpo2       : MPO — second operator (lower).
+    fitmpo     : MPO — the MPO being fitted (modified in-place by the caller).
+    init_center : int — initial stale-window center (default 0).
+    """
+
+    def __init__(self, mpo1: MPO, mpo2: MPO, fitmpo: MPO,
+                 init_center: int = 0) -> None:
+        assert len(mpo1) == len(mpo2) == len(fitmpo), (
+            f"mpo1 ({len(mpo1)}), mpo2 ({len(mpo2)}), fitmpo ({len(fitmpo)}) "
+            "must all have the same number of sites."
+        )
+        self.mpo1 = mpo1
+        self.mpo2 = mpo2
+        self.fitmpo = fitmpo
+        L0, R0 = MPOProductEnv._make_boundaries(mpo1, mpo2, fitmpo)
+        super().__init__(
+            N=len(mpo1),
+            L0=L0,
+            R0=R0,
+            tensors_to_watch=[fitmpo],
+            init_center=init_center,
+        )
+
+    @staticmethod
+    def _make_boundaries(mpo1, mpo2, fitmpo):
+        """Construct rank-3 left and right boundary tensors.
+
+        Bond directions follow the same logic as OperatorEnv: the boundary
+        tensor legs must contract with the corresponding edge bonds.
+
+            L0["mid"] contracts with W1[0]["l"]         → redirect of W1[0]["l"]
+            L0["dn"]  contracts with W2[0]["l"]         → redirect of W2[0]["l"]
+            L0["up"]  contracts with fitmpo[0].Dag["l"] → fitmpo[0]["l"] as-is
+            (analogous for R0 with the last site's "r" bonds)
+        """
+        use_complex = (
+            any_complex_tensors(mpo1)
+            or any_complex_tensors(mpo2)
+            or any_complex_tensors(fitmpo)
+        )
+        ut_dtype = cytnx.Type.ComplexDouble if use_complex else cytnx.Type.Double
+
+        b_mid = mpo1[0].bond("l").redirect()
+        b_dn = mpo2[0].bond("l").redirect()
+        b_up = fitmpo[0].bond("l")
+        L0 = cytnx.UniTensor(
+            [b_up, b_mid, b_dn], labels=["up", "mid", "dn"], dtype=ut_dtype,
+        )
+        L0.at([0, 0, 0]).value = 1.0
+
+        b_mid = mpo1[-1].bond("r").redirect()
+        b_dn = mpo2[-1].bond("r").redirect()
+        b_up = fitmpo[-1].bond("r")
+        R0 = cytnx.UniTensor(
+            [b_up, b_mid, b_dn], labels=["up", "mid", "dn"], dtype=ut_dtype,
+        )
+        R0.at([0, 0, 0]).value = 1.0
+        return L0, R0
+
+    def _grow_left(self, p: int, prev_env: "cytnx.UniTensor") -> "cytnx.UniTensor":
+        """Extend left environment by absorbing site p (left-to-right).
+
+        Contraction order:
+            1. E  + A†  → contract "up" ↔ A†.l
+            2. tmp + W1 → contract "mid" ↔ W1.l,  A†.ip ↔ W1.ip
+            3. tmp + W2 → contract "dn" ↔ W2.l,  W1.i ↔ W2.ip,  A†.i ↔ W2.i
+        Result labels: ["up", "mid", "dn"]
+        """
+        E = prev_env.relabels(["up", "mid", "dn"], ["_up", "_mid", "_dn"])
+        A = self.fitmpo[p].Dagger().relabels(
+            ["l", "ip", "i", "r"], ["_up", "_ip", "_i", "up"],
+        )
+        W1 = self.mpo1[p].relabels(
+            ["l", "ip", "i", "r"], ["_mid", "_ip", "_i1", "mid"],
+        )
+        W2 = self.mpo2[p].relabels(
+            ["l", "ip", "i", "r"], ["_dn", "_i1", "_i", "dn"],
+        )
+        tmp = cytnx.Contract(E, A)
+        tmp = cytnx.Contract(tmp, W1)
+        tmp = cytnx.Contract(tmp, W2)
+        return tmp  # labels: ["up", "mid", "dn"]
+
+    def _grow_right(self, p: int, next_env: "cytnx.UniTensor") -> "cytnx.UniTensor":
+        """Extend right environment by absorbing site p (right-to-left).
+
+        Same contraction pattern as `_grow_left` but using the "r" bonds.
+        """
+        E = next_env.relabels(["up", "mid", "dn"], ["_up", "_mid", "_dn"])
+        A = self.fitmpo[p].Dagger().relabels(
+            ["l", "ip", "i", "r"], ["up", "_ip", "_i", "_up"],
+        )
+        W1 = self.mpo1[p].relabels(
+            ["l", "ip", "i", "r"], ["mid", "_ip", "_i1", "_mid"],
+        )
+        W2 = self.mpo2[p].relabels(
+            ["l", "ip", "i", "r"], ["dn", "_i1", "_i", "_dn"],
+        )
+        tmp = cytnx.Contract(E, A)
+        tmp = cytnx.Contract(tmp, W1)
+        tmp = cytnx.Contract(tmp, W2)
+        return tmp  # labels: ["up", "mid", "dn"]

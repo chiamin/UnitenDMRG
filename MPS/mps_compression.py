@@ -6,7 +6,7 @@ import sys
 
 import cytnx
 
-from .uniTensor_core import svd_by_labels
+from unitensor.core import svd_by_labels
 from .mps import MPS
 
 

@@ -7,7 +7,7 @@ import numpy as np
 import cytnx
 
 from ..mps import MPS
-from ..uniTensor_core import bond_qnums_at, derive_delta_qn
+from unitensor.core import bond_qnums_at, derive_delta_qn
 
 
 class PhysicalSite:
@@ -24,16 +24,17 @@ class PhysicalSite:
         Physical bond, must be BD_IN.
     type_name : str
         Optional label, e.g. "SpinHalf", "Electron".
-    ops : dict[str, tuple[np.ndarray, int]] | None
-        Operator definitions: name → (matrix, delta_qn).
-        delta_qn is derived automatically if not provided via register_op.
+    ops : dict[str, tuple[np.ndarray, int | list[int], bool]] | None
+        Operator definitions: name → (matrix, delta_qn, fermionic).
+        delta_qn is int or list[int] (one per symmetry).
+        The fermionic flag defaults to False if a 2-tuple is given.
     """
 
     def __init__(
         self,
         bond: "cytnx.Bond",
         type_name: str = "",
-        ops: "dict[str, tuple[np.ndarray, int]] | None" = None,
+        ops: "dict[str, tuple] | None" = None,
     ) -> None:
         if not isinstance(bond, cytnx.Bond):
             raise TypeError(f"bond must be cytnx.Bond; got {type(bond).__name__}.")
@@ -42,16 +43,29 @@ class PhysicalSite:
         self._bond = bond
         self.type_name = type_name
         self._ops: dict[str, np.ndarray] = {}
-        self._delta_qn: dict[str, int] = {}
+        self._delta_qn: dict[str, list[int]] = {}
+        self._fermionic: dict[str, bool] = {}
         if ops:
-            for name, (matrix, delta_qn) in ops.items():
-                self.register_op(name, matrix, delta_qn)
+            for name, val in ops.items():
+                if len(val) == 2:
+                    matrix, delta_qn = val
+                    fermionic = False
+                else:
+                    matrix, delta_qn, fermionic = val
+                self.register_op(name, matrix, delta_qn, fermionic=fermionic)
 
     # ------------------------------------------------------------------
     # Operator registry
     # ------------------------------------------------------------------
 
-    def register_op(self, name: str, matrix: np.ndarray, delta_qn: int) -> None:
+    def register_op(
+        self,
+        name: str,
+        matrix: np.ndarray,
+        delta_qn: "int | list[int]",
+        *,
+        fermionic: bool = False,
+    ) -> None:
         """Register a local operator by name.
 
         Parameters
@@ -60,9 +74,14 @@ class PhysicalSite:
             Operator name, e.g. "Sz", "Sp".
         matrix : np.ndarray
             d×d matrix in the physical basis (row=ip/bra, col=i/ket).
-        delta_qn : int
-            QN charge of this operator: QN(ip) - QN(i) for every nonzero element.
+        delta_qn : int or list[int]
+            QN charge of this operator: QN(ip) - QN(i) for every nonzero
+            element.  For multi-symmetry bonds, provide a list with one
+            entry per symmetry.  A bare int is converted to [int].
             Use derive_delta_qn(matrix, bond) to compute this automatically.
+        fermionic : bool
+            If True, this operator is fermionic (odd fermion parity).
+            AutoMPO uses this to insert Jordan-Wigner F strings automatically.
         """
         matrix = np.asarray(matrix)
         d = self._bond.dim()
@@ -70,8 +89,11 @@ class PhysicalSite:
             raise ValueError(
                 f"Operator '{name}' must be ({d},{d}); got {matrix.shape}."
             )
+        if isinstance(delta_qn, int):
+            delta_qn = [delta_qn]
         self._ops[name] = matrix
         self._delta_qn[name] = delta_qn
+        self._fermionic[name] = fermionic
 
     def op(self, name: str) -> np.ndarray:
         """Return the d×d numpy matrix for operator `name`."""
@@ -82,11 +104,17 @@ class PhysicalSite:
             )
         return self._ops[name]
 
-    def op_delta_qn(self, name: str) -> int:
-        """Return the QN charge of operator `name`."""
+    def op_delta_qn(self, name: str) -> list[int]:
+        """Return the QN charge of operator `name` (one int per symmetry)."""
         if name not in self._delta_qn:
             raise KeyError(f"Operator '{name}' not registered.")
         return self._delta_qn[name]
+
+    def op_is_fermionic(self, name: str) -> bool:
+        """Return True if operator `name` is fermionic (odd fermion parity)."""
+        if name not in self._fermionic:
+            raise KeyError(f"Operator '{name}' not registered.")
+        return self._fermionic[name]
 
     def has_qn(self) -> bool:
         """Return True if this site uses QN symmetry."""

@@ -6,21 +6,25 @@ operations are added.
 
 Current contents
 ----------------
-- `inner(psi, phi)`                            -> `<psi|phi>`
-- `expectation(psi, mpo, phi)`                 -> `<psi|mpo|phi>`
-- `mps_sum(psi, phi)`                          -> MPS representing |psi> + |phi>
-- `mpo_sum(mpo1, mpo2)`                        -> MPO representing mpo1 + mpo2
-- `fit_apply_mpo(mpo, mps_input, fitmps, ...)` -> approximate MPO|mps_input> by fitting
+- `inner(psi, phi)`                                -> `<psi|phi>`
+- `expectation(psi, mpo, phi)`                     -> `<psi|mpo|phi>`
+- `mps_sum(psi, phi)`                              -> MPS representing |psi> + |phi>
+- `mpo_sum(mpo1, mpo2)`                            -> MPO representing mpo1 + mpo2
+- `mpo_product(mpo1, mpo2)`                        -> MPO representing mpo1 @ mpo2
+- `fit_apply_mpo(mpo, mps_input, fitmps, ...)`     -> approximate MPO|mps_input> by fitting
+- `fit_mpo_product(mpo1, mpo2, fitmpo, ...)`       -> approximate mpo1 @ mpo2 by fitting
 """
 
 from __future__ import annotations
+
+import sys
 
 import cytnx
 
 from .mps import MPS
 from .mpo import MPO
-from .uniTensor_core import assert_bond_match, direct_sum, scalar_from_uniTensor
-from .uniTensor_utils import any_complex_tensors
+from unitensor.core import assert_bond_match, direct_sum, scalar_from_uniTensor
+from unitensor.utils import any_complex_tensors
 
 
 def inner(psi, phi) -> float | complex:
@@ -250,3 +254,176 @@ def mpo_sum(mpo1: MPO, mpo2: MPO) -> MPO:
             C = direct_sum(A, B, ["l", "r"], ["l", "r"], ["l", "r"])
         tensors.append(C)
     return MPO(tensors)
+
+
+def mpo_product(mpo1: MPO, mpo2: MPO) -> MPO:
+    """Return the MPO representing mpo1 @ mpo2 (mpo1 applied after mpo2).
+
+    At each site, contracts `mpo1[k].bond("i")` with `mpo2[k].bond("ip")`,
+    then combines the virtual bonds via `combineBonds`.  The result has
+    `bond("ip")` from mpo1 and `bond("i")` from mpo2.
+
+    Virtual bond dimensions become the product of the input dimensions:
+    `D_out[k] = D1[k] * D2[k]`.
+
+    Physical bonds at each site must match: `mpo1[k].bond("i")` must be
+    compatible with `mpo2[k].bond("ip")`.
+    """
+    N = len(mpo1)
+    if N != len(mpo2):
+        raise ValueError(f"MPO length mismatch: {len(mpo1)} != {len(mpo2)}.")
+    tensors = []
+    for k in range(N):
+        upper = mpo1[k].clone().relabels(
+            ["l", "ip", "i", "r"], ["l1", "ip", "_s", "r1"],
+        )
+        lower = mpo2[k].clone().relabels(
+            ["l", "ip", "i", "r"], ["l2", "_s", "i", "r2"],
+        )
+        c = cytnx.Contract(upper, lower)
+        c = c.permute(["l1", "l2", "ip", "i", "r1", "r2"])
+        c.combineBonds(["l1", "l2"])
+        c.combineBonds(["r1", "r2"])
+        c.relabels_(["l1", "ip", "i", "r1"], ["l", "ip", "i", "r"])
+        tensors.append(c)
+    return MPO(tensors)
+
+
+def fit_mpo_product(
+    mpo1: MPO,
+    mpo2: MPO,
+    fitmpo: MPO,
+    *,
+    nsweep: int = 1,
+    max_dim: int | None = None,
+    cutoff: float = 0.0,
+) -> MPO:
+    """Approximate `fitmpo ≈ mpo1 @ mpo2` by variational fitting.
+
+    Minimizes `‖mpo1·mpo2 - fitmpo‖_F` by sweeping over MPO sites and
+    solving each local problem exactly (one contraction step, no eigensolver).
+    Never constructs the exact D² product.
+
+    `fitmpo` is modified in-place and also returned.
+
+    Parameters
+    ----------
+    mpo1    : MPO — first (upper) operator.
+    mpo2    : MPO — second (lower) operator.
+    fitmpo  : MPO — initial guess, modified in-place.  Should be
+              right-canonicalized (orthogonality center at site 0).
+    nsweep  : int — number of full (right + left) sweeps.
+    max_dim : int | None — maximum bond dimension per bond.
+    cutoff  : float — discard singular values below this threshold
+              (normalized rho eigenvalue).
+
+    Returns
+    -------
+    fitmpo : the updated MPO (same object that was passed in).
+    """
+    from DMRG.environment import MPOProductEnv
+    from .mpo_compression import _svd_two_mpo_sites
+
+    N = len(mpo1)
+    if len(mpo2) != N or len(fitmpo) != N:
+        raise ValueError(
+            f"Length mismatch: mpo1={len(mpo1)}, mpo2={len(mpo2)}, fitmpo={len(fitmpo)}."
+        )
+
+    dim = sys.maxsize if max_dim is None else max_dim
+
+    # Build environment for Tr[fitmpo† · mpo1 · mpo2].
+    env = MPOProductEnv(mpo1, mpo2, fitmpo, init_center=0)
+
+    def _contract_local(p: int) -> "cytnx.UniTensor":
+        """Contract L[p-1], W1[p], W2[p], R[p+1] → optimal 1-site M_fit[p].
+
+        Open legs: L.up→l, W1.ip→ip, W2.i→i, R.up→r
+        """
+        Lr = env[p - 1].relabels(["up", "mid", "dn"], ["l", "_mid", "_dn"])
+        W1 = mpo1[p].relabels(
+            ["l", "ip", "i", "r"], ["_mid", "ip", "_i1", "_mid2"],
+        )
+        W2 = mpo2[p].relabels(
+            ["l", "ip", "i", "r"], ["_dn", "_i1", "i", "_dn2"],
+        )
+        Rr = env[p + 1].relabels(["up", "mid", "dn"], ["r", "_mid2", "_dn2"])
+        tmp = cytnx.Contract(Lr, W1)
+        tmp = cytnx.Contract(tmp, W2)
+        return cytnx.Contract(tmp, Rr)  # labels: ["l", "ip", "i", "r"]
+
+    def _contract_local_2site(p: int) -> "cytnx.UniTensor":
+        """Contract L[p-1], W1[p], W2[p], W1[p+1], W2[p+1], R[p+2]
+        → optimal 2-site merged tensor with labels [l, ip0, i0, ip1, i1, r].
+        """
+        Lr = env[p - 1].relabels(["up", "mid", "dn"], ["l", "_mid", "_dn"])
+        W1a = mpo1[p].relabels(
+            ["l", "ip", "i", "r"], ["_mid", "ip0", "_i1a", "_m1"],
+        )
+        W2a = mpo2[p].relabels(
+            ["l", "ip", "i", "r"], ["_dn", "_i1a", "i0", "_d1"],
+        )
+        W1b = mpo1[p + 1].relabels(
+            ["l", "ip", "i", "r"], ["_m1", "ip1", "_i1b", "_mid2"],
+        )
+        W2b = mpo2[p + 1].relabels(
+            ["l", "ip", "i", "r"], ["_d1", "_i1b", "i1", "_dn2"],
+        )
+        Rr = env[p + 2].relabels(["up", "mid", "dn"], ["r", "_mid2", "_dn2"])
+        tmp = cytnx.Contract(Lr, W1a)
+        tmp = cytnx.Contract(tmp, W2a)
+        tmp = cytnx.Contract(tmp, W1b)
+        tmp = cytnx.Contract(tmp, W2b)
+        return cytnx.Contract(tmp, Rr)
+
+    def _update_1site(p: int, absorb: str) -> None:
+        env.update_envs(p, p)
+        new_tensor = _contract_local(p)
+        # SVD to shift the orthogonality center.
+        if absorb == "right" and p < N - 1:
+            left_new, right_new, _ = _svd_two_mpo_sites(
+                new_tensor, fitmpo.tensors[p + 1],
+                absorb="right", dim=dim, cutoff=cutoff,
+            )
+            fitmpo.tensors[p] = left_new
+            fitmpo.tensors[p + 1] = right_new
+        elif absorb == "left" and p > 0:
+            left_new, right_new, _ = _svd_two_mpo_sites(
+                fitmpo.tensors[p - 1], new_tensor,
+                absorb="left", dim=dim, cutoff=cutoff,
+            )
+            fitmpo.tensors[p - 1] = left_new
+            fitmpo.tensors[p] = right_new
+        else:
+            fitmpo.tensors[p] = new_tensor
+        # Notify the environment that fitmpo changed.
+        env.delete(p)
+
+    def _update_2site(p: int, absorb: str) -> None:
+        env.update_envs(p, p + 1)
+        merged = _contract_local_2site(p)
+        # SVD split: row = [l, ip0, i0], col = [ip1, i1, r]
+        from unitensor.core import svd_by_labels
+        left_new, right_new, _ = svd_by_labels(
+            merged,
+            row_labels=["l", "ip0", "i0"],
+            absorb=absorb,
+            dim=dim, cutoff=cutoff, aux_label="_aux",
+        )
+        left_new.relabels_(["ip0", "i0", "_aux"], ["ip", "i", "r"])
+        right_new.relabels_(["_aux", "ip1", "i1"], ["l", "ip", "i"])
+        fitmpo.tensors[p] = left_new
+        fitmpo.tensors[p + 1] = right_new
+        env.delete(p)
+        env.delete(p + 1)
+
+    for _ in range(nsweep):
+        # Sweep right: p = 0 … N-2
+        for p in range(N - 1):
+            _update_2site(p, absorb="right")
+
+        # Sweep left: p = N-2 … 0
+        for p in range(N - 2, -1, -1):
+            _update_2site(p, absorb="left")
+
+    return fitmpo
