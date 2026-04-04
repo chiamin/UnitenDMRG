@@ -1,4 +1,4 @@
-"""Tests for AutoMPO."""
+"""Tests for bosonic AutoMPO: Heisenberg, charge-changing, QN, dtype rules."""
 
 import sys
 import unittest
@@ -18,120 +18,9 @@ if cytnx is not None:
     from MPS.physical_sites import spin_half
     from MPS.auto_mpo import AutoMPO
     from tests.helpers.heisenberg import heisenberg_mpo
+    from tests.helpers.mpo_utils import mpo_full_matrix
 
 SKIP = unittest.skipIf(cytnx is None, "cytnx not available")
-
-
-# ---------------------------------------------------------------------------
-# Helper: extract full dense matrix from MPO via full contraction
-# ---------------------------------------------------------------------------
-
-def _get_dense_numpy(ut):
-    """Return the full dense numpy array for a UniTensor (dense or QN)."""
-    if ut.is_blockform():
-        # Convert QN tensor to dense first
-        shape = list(ut.shape())
-        arr = np.zeros(shape, dtype=ut.get_block().numpy().dtype)
-        # Iterate over all blocks and place them into the dense array
-        # Build index maps: for each bond, map flat_idx -> (sector, offset)
-        from MPS.uniTensor_core import _bond_sector_at
-        bonds = [ut.bond(label) for label in ut.labels()]
-        n = len(bonds)
-
-        from itertools import product as iproduct
-        for idx in iproduct(*[range(s) for s in shape]):
-            try:
-                val = ut.at(list(idx)).value
-            except (RuntimeError, ValueError):
-                # Invalid flat index for this QN block structure.
-                continue
-            arr[idx] = val
-        return arr
-    return ut.get_block().numpy()
-
-
-def mpo_full_matrix(mpo):
-    """Return the d^N × d^N dense matrix by pure numpy contraction.
-
-    W[0]["l"] and W[-1]["r"] each have dim=1, so the boundary condition is
-    simply vec = [1.0] on the left and val = vec[0] on the right.
-    """
-    N = len(mpo)
-    d = mpo.phys_dims[0]
-
-    # Get W arrays in order [l, ip, i, r]
-    W_arrs = []
-    for p in range(N):
-        w_perm = mpo[p].permute(["l", "ip", "i", "r"])
-        W_arrs.append(_get_dense_numpy(w_perm))   # (Dl, d, d, Dr)
-
-    from itertools import product as iproduct
-
-    out_dtype = np.result_type(*[arr.dtype for arr in W_arrs])
-    total_dim = d**N
-    mat = np.zeros((total_dim, total_dim), dtype=out_dtype)
-
-    for bra_idx in iproduct(range(d), repeat=N):
-        for ket_idx in iproduct(range(d), repeat=N):
-            # W[0]["l"] dim=1 → start with scalar [1.0]; W[-1]["r"] dim=1 → read vec[0]
-            vec = np.array([1.0], dtype=out_dtype)
-            for p in range(N):
-                M = W_arrs[p][:, bra_idx[p], ket_idx[p], :]  # (Dl, Dr)
-                vec = M.T @ vec   # (Dr,)
-            val = vec[0]
-
-            bra_flat = sum(bra_idx[p] * d**(N - 1 - p) for p in range(N))
-            ket_flat = sum(ket_idx[p] * d**(N - 1 - p) for p in range(N))
-            mat[bra_flat, ket_flat] = val
-
-    return mat
-
-
-# ---------------------------------------------------------------------------
-# Parsing tests
-# ---------------------------------------------------------------------------
-
-@SKIP
-class TestAutoMPOParsing(unittest.TestCase):
-
-    def setUp(self):
-        self.site = spin_half()
-        self.ampo = AutoMPO(4, self.site)
-
-    def test_add_single_site(self):
-        self.ampo.add(1.0, "Sz", 0)   # should not raise
-
-    def test_add_two_site(self):
-        self.ampo.add(1.0, "Sz", 0, "Sz", 1)
-
-    def test_add_three_site(self):
-        self.ampo.add(1.0, "Sz", 0, "Sz", 1, "Sz", 2)
-
-    def test_sites_must_be_increasing(self):
-        with self.assertRaises(ValueError):
-            self.ampo.add(1.0, "Sz", 1, "Sz", 0)
-
-    def test_sites_must_be_strictly_increasing(self):
-        with self.assertRaises(ValueError):
-            self.ampo.add(1.0, "Sz", 1, "Sz", 1)
-
-    def test_out_of_range_site(self):
-        with self.assertRaises(ValueError):
-            self.ampo.add(1.0, "Sz", 5)
-
-    def test_unknown_op_raises(self):
-        with self.assertRaises(KeyError):
-            self.ampo.add(1.0, "Sx", 0)
-
-    def test_inconsistent_charge_raises(self):
-        ampo = AutoMPO(4, spin_half(qn="Sz"))
-        ampo.add(1.0, "Sp", 0)          # charge +1
-        with self.assertRaises(ValueError):
-            ampo.add(1.0, "Sm", 1)      # charge -1 ≠ +1
-
-    def test_no_terms_raises(self):
-        with self.assertRaises(RuntimeError):
-            self.ampo.to_mpo()
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +48,7 @@ class TestAutoMPODenseHeisenberg(unittest.TestCase):
         ref_mat  = mpo_full_matrix(H_ref)
         auto_mat = mpo_full_matrix(H_auto)
         np.testing.assert_allclose(auto_mat, ref_mat, atol=1e-12,
-                                   err_msg="Dense AutoMPO ≠ heisenberg_mpo")
+                                   err_msg="Dense AutoMPO != heisenberg_mpo")
 
     def test_matrix_matches_heisenberg_mpo_anisotropic(self):
         N = 4
@@ -169,7 +58,7 @@ class TestAutoMPODenseHeisenberg(unittest.TestCase):
         ref_mat  = mpo_full_matrix(H_ref)
         auto_mat = mpo_full_matrix(H_auto)
         np.testing.assert_allclose(auto_mat, ref_mat, atol=1e-12,
-                                   err_msg="Dense AutoMPO ≠ heisenberg_mpo (anisotropic)")
+                                   err_msg="Dense AutoMPO != heisenberg_mpo (anisotropic)")
 
     def test_mpo_structure(self):
         N = 4
@@ -186,9 +75,7 @@ class TestAutoMPODenseHeisenberg(unittest.TestCase):
         for i in range(N):
             ampo.add(2.0, "Sz", i)
         H = ampo.to_mpo()
-        # Full matrix should be 2 * sum_i Sz_i
         mat = mpo_full_matrix(H)
-        # Build reference: 2*(Sz⊗I⊗I + I⊗Sz⊗I + I⊗I⊗Sz)
         Sz = np.diag([0.5, -0.5])
         I2 = np.eye(2)
         ref = 2.0 * (
@@ -208,10 +95,8 @@ class TestAutoMPODenseHeisenberg(unittest.TestCase):
             ampo.add(J2, "Sz", i, "Sz", i + 2)
         H = ampo.to_mpo()
         mat = mpo_full_matrix(H)
-        # Build reference
         Sz = np.diag([0.5, -0.5])
         I2 = np.eye(2)
-        ops = [Sz, I2, I2, I2]
 
         def kron4(a, b, c, dd):
             return np.kron(np.kron(np.kron(a, b), c), dd)
@@ -226,7 +111,6 @@ class TestAutoMPODenseHeisenberg(unittest.TestCase):
         N = 4
         H_real = heisenberg_mpo(N)
         H_cplx = heisenberg_mpo(N, dtype=complex)
-
         for p in range(N):
             self.assertFalse(np.iscomplexobj(H_real[p].get_block().numpy()))
             self.assertTrue(np.iscomplexobj(H_cplx[p].get_block().numpy()))
@@ -275,18 +159,18 @@ class TestAutoMPOQN(unittest.TestCase):
         mat_dense = mpo_full_matrix(H_dense)
         mat_qn    = mpo_full_matrix(H_qn)
         np.testing.assert_allclose(mat_qn, mat_dense, atol=1e-12,
-                                   err_msg="QN MPO ≠ dense MPO")
+                                   err_msg="QN MPO != dense MPO")
 
 
 # ---------------------------------------------------------------------------
-# Charge-changing MPO (Σ Sp_i)
+# Charge-changing MPO
 # ---------------------------------------------------------------------------
 
 @SKIP
 class TestAutoMPOChargeChanging(unittest.TestCase):
 
     def test_sum_sp_dense(self):
-        """Σ_i S+_i should be a matrix that raises total Sz by 1."""
+        """sum_i S+_i should be a matrix that raises total Sz by 1."""
         N = 3
         site = spin_half()
         ampo = AutoMPO(N, site)
@@ -294,7 +178,6 @@ class TestAutoMPOChargeChanging(unittest.TestCase):
             ampo.add(1.0, "Sp", i)
         H = ampo.to_mpo()
         mat = mpo_full_matrix(H)
-        # Build reference: Sp⊗I⊗I + I⊗Sp⊗I + I⊗I⊗Sp
         Sp = np.array([[0, 0], [1, 0]], dtype=float)
         I2 = np.eye(2)
         ref = (np.kron(np.kron(Sp, I2), I2) +
@@ -303,13 +186,13 @@ class TestAutoMPOChargeChanging(unittest.TestCase):
         np.testing.assert_allclose(mat, ref, atol=1e-12)
 
     def test_sum_sp_qn(self):
-        """QN AutoMPO for Σ S+_i: total_charge = +1."""
+        """QN AutoMPO for sum S+_i: total_charge = +1."""
         N = 3
         site = spin_half(qn="Sz")
         ampo = AutoMPO(N, site)
         for i in range(N):
             ampo.add(1.0, "Sp", i)
-        H = ampo.to_mpo()   # should not raise
+        H = ampo.to_mpo()
         self.assertEqual(len(H), N)
 
 

@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unitendmrg"
+version = "0.1.0"
+description = "Python DMRG implementation using cytnx, supporting QN-symmetric tensors"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["MPS*", "DMRG*", "TDVP*", "linalg*", "unitensor*", "lattice*"]
+exclude = ["tests*", "examples*", "scratch*", "old*", "cytnx_bugs*"]

@@ -10,6 +10,7 @@ Current contents
 - `expectation(psi, mpo, phi)`                     -> `<psi|mpo|phi>`
 - `mps_sum(psi, phi)`                              -> MPS representing |psi> + |phi>
 - `mpo_sum(mpo1, mpo2)`                            -> MPO representing mpo1 + mpo2
+- `exact_apply_mpo(mpo, mps)`                      -> exact MPS representing MPO|mps>
 - `mpo_product(mpo1, mpo2)`                        -> MPO representing mpo1 @ mpo2
 - `fit_apply_mpo(mpo, mps_input, fitmps, ...)`     -> approximate MPO|mps_input> by fitting
 - `fit_mpo_product(mpo1, mpo2, fitmpo, ...)`       -> approximate mpo1 @ mpo2 by fitting
@@ -254,6 +255,40 @@ def mpo_sum(mpo1: MPO, mpo2: MPO) -> MPO:
             C = direct_sum(A, B, ["l", "r"], ["l", "r"], ["l", "r"])
         tensors.append(C)
     return MPO(tensors)
+
+
+def exact_apply_mpo(mpo: MPO, mps: MPS) -> MPS:
+    """Return the MPS representing MPO|mps> (exact, no truncation).
+
+    At each site, contracts `mpo[k]` with `mps[k]` over the physical index,
+    then combines the virtual bonds via `combineBonds`.  The result has
+    `bond("i")` from `mpo[k].bond("ip")`.
+
+    Virtual bond dimensions become the product of the input dimensions:
+    `D_out[k] = D_mpo[k] * D_mps[k]`.
+
+    Use `svd_compress_mps` afterwards if compression is needed.
+    """
+    N = len(mpo)
+    if N != len(mps):
+        raise ValueError(f"Length mismatch: len(mpo)={len(mpo)}, len(mps)={len(mps)}.")
+    for k in range(N):
+        assert_bond_match(mps[k].bond("i"), mpo[k].bond("i"))
+    tensors = []
+    for k in range(N):
+        W = mpo[k].clone().relabels(
+            ["l", "ip", "i", "r"], ["l1", "i", "_s", "r1"],
+        )
+        A = mps[k].clone().relabels(
+            ["l", "i", "r"], ["l2", "_s", "r2"],
+        )
+        c = cytnx.Contract(W, A)
+        c = c.permute(["l1", "l2", "i", "r1", "r2"])
+        c.combineBonds(["l1", "l2"])
+        c.combineBonds(["r1", "r2"])
+        c.relabels_(["l1", "i", "r1"], ["l", "i", "r"])
+        tensors.append(c)
+    return MPS(tensors)
 
 
 def mpo_product(mpo1: MPO, mpo2: MPO) -> MPO:

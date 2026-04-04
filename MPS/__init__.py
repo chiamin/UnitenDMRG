@@ -6,7 +6,14 @@ from .mpo import MPO
 # denmat_compress_mps is commented out until cytnx fixes "svd-aux-qnums".
 # See _internal/CYTNX_BUGS.md and _internal/TODO.md.
 from .mps_compression import svd_compress_mps
-from .mps_operations import expectation, inner
+from .mpo_compression import svd_compress_mpo
+from .mps_operations import (
+    exact_apply_mpo,
+    expectation,
+    fit_mpo_product,
+    inner,
+    mpo_product,
+)
 
 __all__ = [
     "MPS",
@@ -15,4 +22,8 @@ __all__ = [
     "inner",
     "expectation",
     "svd_compress_mps",
+    "svd_compress_mpo",
+    "exact_apply_mpo",
+    "mpo_product",
+    "fit_mpo_product",
 ]
