@@ -47,6 +47,12 @@ Coverage
 10. Imaginary-time convergence  (TestTDVPImaginaryTime)
     - Imaginary-time evolution converges to ground-state energy
     - Both 1-site (warm-start) and 2-site TDVP reach the exact ground energy
+
+11-13. QN variants: norm preservation, energy conservation, imaginary-time
+
+dtype coverage (bra = ket always in TDVP):
+  Dense: <real|realH|real>, <complex|realH|complex>, <complex|complexH|complex>
+  QN:    <real|realH|real>, <complex|realH|complex>, <complex|complexH|complex>
 """
 
 from __future__ import annotations
@@ -545,6 +551,17 @@ class TestTDVPNormPreservation(unittest.TestCase):
         """2-site real-time TDVP preserves the MPS norm."""
         self._check_norm(num_center=2)
 
+    def test_2site_norm_preserved_complex_mps_real_H(self):
+        """2-site real-time TDVP with complex MPS + real MPO preserves norm."""
+        psi   = _make_psi(self.N, D=4, seed=10, dtype=complex)
+        H_mpo = heisenberg_mpo(self.N)
+        norm_before = self._mps_norm(psi)
+        engine = TDVPEngine(psi, H_mpo)
+        for _ in range(4):
+            engine.sweep(dt=1j * 0.05, max_dim=8, cutoff=0.0, num_center=2)
+        norm_after = self._mps_norm(psi)
+        self.assertAlmostEqual(norm_after / norm_before, 1.0, delta=self.ATOL)
+
 
 # ---------------------------------------------------------------------------
 # 9. Energy conservation — real-time evolution
@@ -677,6 +694,15 @@ class TestTDVPImaginaryTime(unittest.TestCase):
                                  msg=f"Energy increased at step {i}: "
                                      f"{energies[i-1]:.6f} → {energies[i]:.6f}")
 
+    def test_2site_imagtime_complex_mps_real_H(self):
+        """2-site imaginary-time TDVP with complex MPS + real MPO converges to E0."""
+        psi    = _make_psi(self.N, D=8, seed=5, dtype=complex)
+        engine = TDVPEngine(psi, self.H_mpo)
+        for _ in range(50):
+            engine.sweep(dt=0.1, max_dim=16, cutoff=1e-10, num_center=2)
+        E = self._measure_energy(psi)
+        self.assertAlmostEqual(E, self.E0_exact, delta=self.ATOL)
+
 
 # ---------------------------------------------------------------------------
 # 11. QN norm preservation — real-time evolution
@@ -719,6 +745,17 @@ class TestTDVPNormPreservationQN(unittest.TestCase):
     def test_2site_norm_preserved(self):
         """2-site real-time QN TDVP preserves the MPS norm."""
         self._check_norm(num_center=2)
+
+    def test_2site_norm_preserved_complex_mps_real_H(self):
+        """2-site real-time QN TDVP with complex MPS + real MPO preserves norm."""
+        psi   = _make_qn_psi(self.N, self.N_UP, seed=10, dtype=complex)
+        H_mpo = _qn_heisenberg_mpo(self.N)
+        norm_before = self._mps_norm(psi)
+        engine = TDVPEngine(psi, H_mpo)
+        for _ in range(4):
+            engine.sweep(dt=1j * 0.05, max_dim=8, cutoff=0.0, num_center=2)
+        norm_after = self._mps_norm(psi)
+        self.assertAlmostEqual(norm_after / norm_before, 1.0, delta=self.ATOL)
 
 
 # ---------------------------------------------------------------------------
@@ -851,6 +888,15 @@ class TestTDVPImaginaryTimeQN(unittest.TestCase):
             self.assertLessEqual(energies[i], energies[i - 1] + 1e-6,
                                  msg=f"Energy increased at step {i}: "
                                      f"{energies[i-1]:.6f} → {energies[i]:.6f}")
+
+    def test_2site_imagtime_complex_mps_real_H(self):
+        """2-site imaginary-time QN TDVP with complex MPS + real MPO converges to E0."""
+        psi    = _make_qn_psi(self.N, self.N_UP, seed=5, dtype=complex)
+        engine = TDVPEngine(psi, self.H_mpo)
+        for _ in range(50):
+            engine.sweep(dt=0.1, max_dim=16, cutoff=1e-10, num_center=2)
+        E = self._measure_energy(psi)
+        self.assertAlmostEqual(E, self.E0_exact, delta=self.ATOL)
 
 
 if __name__ == "__main__":

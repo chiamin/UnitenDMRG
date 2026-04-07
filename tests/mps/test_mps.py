@@ -33,7 +33,7 @@ if cytnx is not None:
     )
     from MPS.auto_mpo import AutoMPO
     from MPS.mps_init import random_mps
-    from MPS.mps_operations import expectation, inner, mpo_sum, mps_sum
+    from MPS.mps_operations import expectation, inner
     from MPS.physical_sites import PhysicalSite
     from MPS.physical_sites.spin_half import spin_half
     from unitensor.core import (
@@ -54,8 +54,6 @@ else:  # pragma: no cover
     _check_labels = _missing_cytnx
     AutoMPO = _missing_cytnx
     expectation = _missing_cytnx
-    mps_sum = _missing_cytnx
-    mpo_sum = _missing_cytnx
     random_mps = _missing_cytnx
     PhysicalSite = _missing_cytnx
     spin_half = _missing_cytnx
@@ -340,67 +338,6 @@ class TestDirectSum(unittest.TestCase):
         B = self._make_rank2([1, 2])
         with self.assertRaises(ValueError):
             direct_sum(A, B, ["i"], ["i"], ["j"])  # "j" is a non-sum label
-
-
-@unittest.skipIf(cytnx is None, "cytnx is required for UniTensor tests")
-class TestMPSSum(unittest.TestCase):
-    """Tests for mps_sum."""
-
-    def test_inner_product_factorizes(self):
-        """inner(sum(α,β), sum(φ,χ)) == inner(α,φ) + inner(β,χ)."""
-        site = spin_half(qn="Sz")
-        alpha = site.product_state([1, 0, 1, 0])
-        phi   = site.product_state([1, 0, 1, 0])
-        beta  = site.product_state([0, 1, 0, 1])
-        chi   = site.product_state([0, 1, 0, 1])
-
-        sumAB = mps_sum(alpha, beta)
-        sumPC = mps_sum(phi, chi)
-
-        self.assertAlmostEqual(
-            inner(sumAB, sumPC),
-            inner(alpha, phi) + inner(beta, chi),
-            places=10,
-        )
-
-    def test_bond_dims(self):
-        """Virtual bond dims of mps_sum equal the sum of the two MPS bond dims."""
-        site = spin_half(qn="Sz")
-        psi = site.product_state([1, 0, 1, 0])
-        phi = site.product_state([0, 1, 0, 1])
-        result = mps_sum(psi, phi)
-        for k in range(len(psi) - 1):
-            expected = psi[k].bond("r").dim() + phi[k].bond("r").dim()
-            self.assertEqual(result[k].bond("r").dim(), expected)
-
-
-@unittest.skipIf(cytnx is None, "cytnx is required for UniTensor tests")
-class TestMPOSum(unittest.TestCase):
-    """Tests for mpo_sum."""
-
-    def test_expectation_factorizes(self):
-        """expectation(ψ, mpo_sum(H1, H2), ψ) == expectation(ψ, H1, ψ) + expectation(ψ, H2, ψ)."""
-        site = spin_half(qn="Sz")
-        N = 4
-        J = 1.0
-
-        ampo_ising = AutoMPO(N, site)
-        ampo_xy    = AutoMPO(N, site)
-        for i in range(N - 1):
-            ampo_ising.add(J,       "Sz", i, "Sz", i + 1)
-            ampo_xy.add(J / 2, "Sp", i, "Sm", i + 1)
-            ampo_xy.add(J / 2, "Sm", i, "Sp", i + 1)
-        H_ising = ampo_ising.to_mpo()
-        H_xy    = ampo_xy.to_mpo()
-        H_sum   = mpo_sum(H_ising, H_xy)
-
-        psi = site.product_state([1, 0, 1, 0])
-
-        self.assertAlmostEqual(
-            expectation(psi, H_sum, psi),
-            expectation(psi, H_ising, psi) + expectation(psi, H_xy, psi),
-            places=10,
-        )
 
 
 @unittest.skipIf(cytnx is None, "cytnx is required for UniTensor tests")

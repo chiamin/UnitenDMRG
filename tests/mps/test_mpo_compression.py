@@ -165,6 +165,22 @@ class TestSVDCompressMPOQN(unittest.TestCase):
         self.assertEqual(H2[0].bond("l").dim(), 1)
         self.assertEqual(H2[-1].bond("r").dim(), 1)
 
+    def test_qn_complex_no_truncation(self):
+        """Complex QN MPO should be preserved without truncation."""
+        H = _heisenberg_mpo_qn(self.NUM_SITES)
+        Hc = MPO([t.astype(cytnx.Type.ComplexDouble) for t in H.tensors])
+        Hc2 = svd_compress_mpo(Hc)
+        np.testing.assert_allclose(mpo_full_matrix(Hc2), mpo_full_matrix(Hc), atol=1e-10)
+
+    def test_qn_complex_reduces_bond_dim(self):
+        """max_dim should reduce complex QN MPO bond dimensions."""
+        H = _heisenberg_mpo_qn(self.NUM_SITES)
+        Hc = MPO([t.astype(cytnx.Type.ComplexDouble) for t in H.tensors])
+        orig_max = max(Hc.mpo_dims[1:-1])
+        Hc2 = svd_compress_mpo(Hc, max_dim=3)
+        new_max = max(Hc2.mpo_dims[1:-1])
+        self.assertLess(new_max, orig_max)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,17 @@ Coverage
 
 6. Complex MPS and MPO  (TestDMRGGroundStateComplex)
    - 2-site DMRG with complex MPS and complex MPO converges to exact ground state
+
+7. QN ground-state energy  (TestDMRGGroundStateQN)
+   - 2-site and 1-site QN DMRG converge to exact energy
+
+8. QN excited-state  (TestDMRGExcitedStateQN)
+
+9. QN complex MPS + complex MPO  (TestDMRGGroundStateQNComplex)
+
+dtype coverage (bra = ket always in DMRG):
+  Dense: <real|realH|real>, <complex|realH|complex>, <complex|complexH|complex>
+  QN:    <real|realH|real>, <complex|realH|complex>, <complex|complexH|complex>
 """
 
 from __future__ import annotations
@@ -349,6 +360,17 @@ class TestDMRGGroundStateComplex(unittest.TestCase):
             E, _ = engine.sweep(max_dim=max_dim, cutoff=1e-10, num_center=2)
         self.assertAlmostEqual(E, self.E0_exact, delta=self.ATOL)
 
+    def test_2site_complex_mps_real_H_ground_state_energy(self):
+        """2-site DMRG with complex MPS and *real* MPO converges to exact energy."""
+        psi = random_mps(self.N, phys_dim=2, bond_dim=4,
+                         dtype=complex, seed=102)
+        psi.move_center(0)
+        engine = DMRGEngine(psi, heisenberg_mpo(self.N))
+        E = None
+        for max_dim in [10, 20, 20]:
+            E, _ = engine.sweep(max_dim=max_dim, cutoff=1e-10, num_center=2)
+        self.assertAlmostEqual(E, self.E0_exact, delta=self.ATOL)
+
     def test_complex_ground_state_overlap_with_real(self):
         """Complex-dtype DMRG ground state has near-unit overlap with real-dtype result.
 
@@ -506,6 +528,15 @@ class TestDMRGGroundStateQNComplex(unittest.TestCase):
         """2-site QN DMRG with complex dtype converges to the exact energy."""
         psi = _make_qn_psi(self.N, self.N_UP, seed=100, dtype=complex)
         engine = DMRGEngine(psi, _qn_heisenberg_mpo(self.N, dtype=complex))
+        E = None
+        for max_dim in [10, 20, 20]:
+            E, _ = engine.sweep(max_dim=max_dim, cutoff=1e-10, num_center=2)
+        self.assertAlmostEqual(E, self.E0_exact, delta=self.ATOL)
+
+    def test_2site_complex_qn_mps_real_H_ground_state_energy(self):
+        """2-site QN DMRG with complex MPS and *real* MPO converges to exact energy."""
+        psi = _make_qn_psi(self.N, self.N_UP, seed=102, dtype=complex)
+        engine = DMRGEngine(psi, _qn_heisenberg_mpo(self.N))
         E = None
         for max_dim in [10, 20, 20]:
             E, _ = engine.sweep(max_dim=max_dim, cutoff=1e-10, num_center=2)

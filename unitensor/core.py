@@ -187,19 +187,43 @@ def _make_expand(
       exp1: embeds bond1 into bond_sum — identity block at (k, k)
       exp2: embeds bond2 into bond_sum — identity block at (k, k + nsec1)
     exp1 has labels [label1, re_label]; exp2 has labels [label2, re_label].
+
+    Supports both QN (BlockUniTensor) and dense bonds.
     """
-    qnums    = list(bond1.qnums()) + list(bond2.qnums())
-    degs     = list(bond1.getDegeneracies()) + list(bond2.getDegeneracies())
-    bond_sum = cytnx.Bond(bond1.type(), qnums, degs, list(bond1.syms()))
-    nsec1    = len(bond1.qnums())
+    is_qn = bond1.Nsym() > 0
 
-    exp1 = cytnx.UniTensor([bond1.redirect(), bond_sum], labels=[label1, re_label], rowrank=1)
-    for k, d in enumerate(bond1.getDegeneracies()):
-        exp1.put_block_(cytnx.eye(d), [label1, re_label], [k, k])
+    if is_qn:
+        qnums    = list(bond1.qnums()) + list(bond2.qnums())
+        degs     = list(bond1.getDegeneracies()) + list(bond2.getDegeneracies())
+        bond_sum = cytnx.Bond(bond1.type(), qnums, degs, list(bond1.syms()))
+        nsec1    = len(bond1.qnums())
 
-    exp2 = cytnx.UniTensor([bond2.redirect(), bond_sum], labels=[label2, re_label], rowrank=1)
-    for k, d in enumerate(bond2.getDegeneracies()):
-        exp2.put_block_(cytnx.eye(d), [label2, re_label], [k, k + nsec1])
+        exp1 = cytnx.UniTensor([bond1.redirect(), bond_sum],
+                               labels=[label1, re_label], rowrank=1)
+        for k, d in enumerate(bond1.getDegeneracies()):
+            exp1.put_block_(cytnx.eye(d), [label1, re_label], [k, k])
+
+        exp2 = cytnx.UniTensor([bond2.redirect(), bond_sum],
+                               labels=[label2, re_label], rowrank=1)
+        for k, d in enumerate(bond2.getDegeneracies()):
+            exp2.put_block_(cytnx.eye(d), [label2, re_label], [k, k + nsec1])
+    else:
+        d1, d2 = bond1.dim(), bond2.dim()
+        d_sum  = d1 + d2
+
+        exp1 = cytnx.UniTensor(cytnx.zeros([d1, d_sum]), rowrank=1)
+        exp1.set_labels([label1, re_label])
+        blk1 = cytnx.eye(d1)
+        for r in range(d1):
+            for c in range(d1):
+                exp1[r, c] = blk1[r, c]
+
+        exp2 = cytnx.UniTensor(cytnx.zeros([d2, d_sum]), rowrank=1)
+        exp2.set_labels([label2, re_label])
+        blk2 = cytnx.eye(d2)
+        for r in range(d2):
+            for c in range(d2):
+                exp2[r, d1 + c] = blk2[r, c]
 
     return exp1, exp2
 
