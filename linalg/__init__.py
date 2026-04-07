@@ -17,10 +17,14 @@ is the only UniTensor-specific operation.
 from .inner import inner
 from .lanczos import lanczos, lanczos_expm_multiply
 from .davidson import davidson
+from .gmres import gmres
+from .conj_grad import cg
 
 __all__ = [
     "inner",
     "lanczos",
     "lanczos_expm_multiply",
     "davidson",
+    "gmres",
+    "cg",
 ]
