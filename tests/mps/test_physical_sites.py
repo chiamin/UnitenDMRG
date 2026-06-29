@@ -117,9 +117,9 @@ class TestSpinHalf(unittest.TestCase):
         site = spin_half(qn="Sz")
         self.assertEqual(site.bond.dim(), 2)
         self.assertEqual(site.bond.Nsym(), 1)
-        # index 0 = dn = N_up = 0, index 1 = up = N_up = 1
-        self.assertEqual(bond_qnums_at(site.bond, 0), [0])
-        self.assertEqual(bond_qnums_at(site.bond, 1), [1])
+        # index 0 = up = N_up = 1, index 1 = dn = N_up = 0
+        self.assertEqual(bond_qnums_at(site.bond, 0), [1])
+        self.assertEqual(bond_qnums_at(site.bond, 1), [0])
 
     def test_unknown_qn_raises(self):
         with self.assertRaises(ValueError):
@@ -167,8 +167,10 @@ class TestSpinHalf(unittest.TestCase):
         Sz = site.op("Sz")
         np.testing.assert_allclose(Sz, np.diag([0.5, -0.5]))
         Sp = site.op("Sp")
-        self.assertAlmostEqual(Sp[1, 0], 1.0)  # Sp|dn>=|up>
-        self.assertAlmostEqual(Sp[0, 1], 0.0)
+        # New basis: index 0 = up, index 1 = dn.  Sp|dn>=|up> means the entry
+        # mapping index 1 (dn) to index 0 (up) is 1, i.e. Sp[0, 1].
+        self.assertAlmostEqual(Sp[0, 1], 1.0)  # Sp|dn>=|up>
+        self.assertAlmostEqual(Sp[1, 0], 0.0)
 
     def test_derive_delta_qn_mixed_raises(self):
         import numpy as np
@@ -257,16 +259,17 @@ class TestProductStateQN(unittest.TestCase):
         self.assertAlmostEqual(psi.norm(), 1.0)
 
     def test_virtual_bond_qns_neel(self):
-        # Neel [0,1,0,1]: N_up = 0,1,0,1  -> cumulative: 0,1,1,2
+        # New basis: index 0 = up (N_up=1), index 1 = dn (N_up=0).
+        # Neel [0,1,0,1] = up,dn,up,dn: N_up = 1,0,1,0 -> cumulative 1,1,2,2
         psi = self.site.product_state([0, 1, 0, 1])
-        expected = [0, 1, 1, 2]
+        expected = [1, 1, 2, 2]
         for i, exp in enumerate(expected):
             qn = psi[i].bond("r").qnums()[0][0]
             self.assertEqual(qn, exp, f"site {i} right bond QN")
 
     def test_virtual_bond_qns_all_up(self):
-        # All up [1,1,1]: cumulative Sz = +1,+2,+3
-        psi = self.site.product_state([1, 1, 1])
+        # All up = index 0 at every site: cumulative N_up = 1,2,3
+        psi = self.site.product_state([0, 0, 0])
         expected = [1, 2, 3]
         for i, exp in enumerate(expected):
             qn = psi[i].bond("r").qnums()[0][0]
@@ -277,13 +280,13 @@ class TestProductStateQN(unittest.TestCase):
         self.assertEqual(psi.center, 2)
 
     def test_total_qn_neel(self):
-        # Neel [0,1,0,1]: total N_up = 0+1+0+1 = 2
+        # Neel [0,1,0,1] = up,dn,up,dn: total N_up = 1+0+1+0 = 2
         psi = self.site.product_state([0, 1, 0, 1])
         self.assertEqual(psi.total_qn, [2])
 
     def test_total_qn_all_up(self):
-        # All up [1,1,1]: total Sz*2 = 3
-        psi = self.site.product_state([1, 1, 1])
+        # All up = index 0 at every site: total N_up = 3
+        psi = self.site.product_state([0, 0, 0])
         self.assertEqual(psi.total_qn, [3])
 
     def test_total_qn_dense_returns_empty(self):

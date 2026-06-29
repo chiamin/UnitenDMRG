@@ -178,7 +178,8 @@ class TestAutoMPOChargeChanging(unittest.TestCase):
             ampo.add(1.0, "Sp", i)
         H = ampo.to_mpo()
         mat = mpo_full_matrix(H)
-        Sp = np.array([[0, 0], [1, 0]], dtype=float)
+        # Use the site's own Sp so the reference follows the basis convention.
+        Sp = site.op("Sp")
         I2 = np.eye(2)
         ref = (np.kron(np.kron(Sp, I2), I2) +
                np.kron(np.kron(I2, Sp), I2) +

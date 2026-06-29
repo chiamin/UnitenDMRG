@@ -14,27 +14,30 @@ def spin_half(qn: str | None = None) -> PhysicalSite:
     """Create a spin-1/2 PhysicalSite with operators I, Sz, Sp, Sm registered.
 
     Basis (fixed):
-        index 0 = |dn⟩  (N_up = 0)
-        index 1 = |up⟩  (N_up = 1)
+        index 0 = |up⟩  (N_up = 1, Sz = +1/2)
+        index 1 = |dn⟩  (N_up = 0, Sz = -1/2)
+
+    Sz = (1/2) * sigma_z = (1/2) * [[1, 0], [0, -1]]:
+        Sz|up⟩ = +1/2,  Sz|dn⟩ = -1/2
 
     Parameters
     ----------
     qn : None or "Sz"
         None  → dense bond, no symmetry.
-        "Sz"  → U(1) N_up-symmetric bond (QN = 0 for |dn⟩, 1 for |up⟩).
+        "Sz"  → U(1) N_up-symmetric bond (QN = 1 for |up⟩, 0 for |dn⟩).
     """
     if qn is None:
         bond = cytnx.Bond(2, cytnx.BD_IN)
     elif qn == "Sz":
         sym  = cytnx.Symmetry.U1()
-        bond = cytnx.Bond(cytnx.BD_IN, [[0], [1]], [1, 1], [sym])
+        bond = cytnx.Bond(cytnx.BD_IN, [[1], [0]], [1, 1], [sym])
     else:
         raise ValueError(f"Unknown qn='{qn}'. Supported values: None, 'Sz'.")
 
     I  = np.eye(2, dtype=float)
-    Sz = np.array([[ 0.5,  0.0], [ 0.0, -0.5]], dtype=float)
-    Sp = np.array([[ 0.0,  0.0], [ 1.0,  0.0]], dtype=float)  # Sp|dn>=|up>: [1,0]=1
-    Sm = np.array([[ 0.0,  1.0], [ 0.0,  0.0]], dtype=float)  # Sm|up>=|dn>: [0,1]=1
+    Sz = np.array([[ 0.5,  0.0], [ 0.0, -0.5]], dtype=float)  # Sz = (1/2)*sigma_z
+    Sp = np.array([[ 0.0,  1.0], [ 0.0,  0.0]], dtype=float)  # Sp|dn>=|up>: [0,1]=1
+    Sm = np.array([[ 0.0,  0.0], [ 1.0,  0.0]], dtype=float)  # Sm|up>=|dn>: [1,0]=1
 
     ops = {
         "I":  (I,  derive_delta_qn(I,  bond)),

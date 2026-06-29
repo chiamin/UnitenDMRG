@@ -106,8 +106,9 @@ class TestRandomU1SzMPS(unittest.TestCase):
         """Same symmetry sector → overlap with a product state in that sector is finite."""
         N, n_up = 5, 2
         mps = random_u1_sz_mps(N, n_up, seed=4)
-        # Two up-spins at the first two sites (indices 1,1,0,0,0) — total N_up = 2
-        seq = [1, 1] + [0] * (N - 2)
+        # New basis: index 0 = up, index 1 = dn.  Two up-spins (total N_up = 2)
+        # are the first two sites at index 0, the rest at index 1.
+        seq = [0, 0] + [1] * (N - 2)
         psi = spin_half(qn="Sz").product_state(seq, center=0)
         ov = complex(inner(psi, mps))
         self.assertTrue(np.isfinite(ov.real) and np.isfinite(ov.imag))
