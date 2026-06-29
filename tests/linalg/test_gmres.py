@@ -20,7 +20,14 @@ import numpy as np
 
 from linalg import gmres
 
-from ._helpers import vec, to_np, make_apply
+from ._helpers import (vec, to_np, make_apply,
+                       make_qn_vector, make_qn_general_apply,
+                       make_qn_hermitian_apply, qn_to_np, qn_dense_matrix)
+
+try:
+    import cytnx
+except ImportError:
+    cytnx = None
 
 
 class TestGMRES(unittest.TestCase):
@@ -121,6 +128,60 @@ class TestGMRES(unittest.TestCase):
                   k=2, tol=1.e-12)
             self.assertTrue(any("did not converge" in str(wi.message) for wi in w),
                             "expected non-convergence warning")
+
+
+# ======================================================================
+# QN: general non-Hermitian A (real and complex)
+#
+# The real-QN case is a regression test for the dtype up-cast fix in gmres:
+# the complex Hessenberg coefficients must be cast back to real before
+# multiplying the (real) Krylov vectors, otherwise a later
+# Contract(A_real, x_complex) hits the cytnx QN mixed-dtype bug.
+# ======================================================================
+
+L_SEC, L_DEG = [0, 1, 2], [3, 3, 2]
+I_SEC, I_DEG = [0, 1], [2, 2]
+
+
+@unittest.skipIf(cytnx is None, "cytnx not available")
+class TestGMRESQN(unittest.TestCase):
+
+    def _solve_and_check(self, apply, b, expect_complex_x):
+        M = qn_dense_matrix(apply, b)
+        x, res = gmres(apply, b, k=M.shape[0] + 2, tol=1e-12)
+        x_np = qn_to_np(x)
+        x_ref = np.linalg.solve(M, qn_to_np(b))
+        self.assertLess(res, 1e-8, f"reported residual {res:.3e}")
+        np.testing.assert_allclose(x_np, x_ref, atol=1e-7, rtol=1e-7)
+        # dtype must follow the input: a real problem stays real (the fix)
+        is_complex = x.dtype() == cytnx.Type.ComplexDouble
+        self.assertEqual(is_complex, expect_complex_x)
+        self.assertEqual(list(x.labels()), list(b.labels()))
+        self.assertEqual(x.Nblocks(), b.Nblocks())
+
+    def test_real_nonhermitian(self):
+        b = make_qn_vector(L_SEC, L_DEG, I_SEC, I_DEG, "real", seed=10)
+        apply, _ = make_qn_general_apply(L_SEC, L_DEG, I_SEC, I_DEG,
+                                         "real", seed=11, shift=4.0)
+        self._solve_and_check(apply, b, expect_complex_x=False)
+
+    def test_complex_nonhermitian(self):
+        b = make_qn_vector(L_SEC, L_DEG, I_SEC, I_DEG, "complex", seed=20)
+        apply, _ = make_qn_general_apply(L_SEC, L_DEG, I_SEC, I_DEG,
+                                         "complex", seed=21, shift=4.0)
+        self._solve_and_check(apply, b, expect_complex_x=True)
+
+    def test_real_hermitian_pd(self):
+        b = make_qn_vector(L_SEC, L_DEG, I_SEC, I_DEG, "real", seed=30)
+        apply, _ = make_qn_hermitian_apply(L_SEC, L_DEG, I_SEC, I_DEG,
+                                           "real", seed=31, shift=1.0)
+        self._solve_and_check(apply, b, expect_complex_x=False)
+
+    def test_complex_hermitian_pd(self):
+        b = make_qn_vector(L_SEC, L_DEG, I_SEC, I_DEG, "complex", seed=40)
+        apply, _ = make_qn_hermitian_apply(L_SEC, L_DEG, I_SEC, I_DEG,
+                                           "complex", seed=41, shift=1.0)
+        self._solve_and_check(apply, b, expect_complex_x=True)
 
 
 if __name__ == "__main__":

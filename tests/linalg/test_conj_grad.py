@@ -19,7 +19,14 @@ import numpy as np
 
 from linalg import cg
 
-from ._helpers import vec, to_np, make_apply
+from ._helpers import (vec, to_np, make_apply,
+                       make_qn_vector, make_qn_hermitian_apply,
+                       qn_to_np, qn_dense_matrix)
+
+try:
+    import cytnx
+except ImportError:
+    cytnx = None
 
 
 class TestCG(unittest.TestCase):
@@ -113,6 +120,38 @@ class TestCG(unittest.TestCase):
                     or "did not converge" in str(wi.message) for wi in w),
                 "expected PD-violation or non-convergence warning",
             )
+
+
+# ======================================================================
+# QN: Hermitian positive-definite A = A^dag A + shift I  (real and complex)
+# ======================================================================
+
+L_SEC, L_DEG = [0, 1, 2], [3, 3, 2]
+I_SEC, I_DEG = [0, 1], [2, 2]
+
+
+@unittest.skipIf(cytnx is None, "cytnx not available")
+class TestCGQN(unittest.TestCase):
+
+    def _check(self, dtype, seed):
+        b = make_qn_vector(L_SEC, L_DEG, I_SEC, I_DEG, dtype, seed=seed)
+        apply, _ = make_qn_hermitian_apply(L_SEC, L_DEG, I_SEC, I_DEG,
+                                           dtype, seed=seed + 1, shift=1.0)
+        M = qn_dense_matrix(apply, b)
+        x, res = cg(apply, b, k=500, tol=1e-12)
+        x_np = qn_to_np(x)
+        x_ref = np.linalg.solve(M, qn_to_np(b))
+        self.assertLess(res, 1e-8, f"reported residual {res:.3e}")
+        np.testing.assert_allclose(x_np, x_ref, atol=1e-7, rtol=1e-7)
+        # QN structure preserved
+        self.assertEqual(list(x.labels()), list(b.labels()))
+        self.assertEqual(x.Nblocks(), b.Nblocks())
+
+    def test_real(self):
+        self._check("real", seed=10)
+
+    def test_complex(self):
+        self._check("complex", seed=20)
 
 
 if __name__ == "__main__":

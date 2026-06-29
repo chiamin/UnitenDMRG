@@ -121,9 +121,21 @@ def gmres(
     e1[0] = beta
     y, *_ = np.linalg.lstsq(H[: m + 1, : m], e1, rcond=None)
 
+    # The Hessenberg H is stored complex to cover non-Hermitian / complex A,
+    # so y is complex even for a real problem.  Multiplying a real UniTensor by
+    # a complex scalar would up-cast it to complex; a later Contract(A_real,
+    # x_complex) then hits the cytnx QN mixed-dtype bug (see CYTNX_BUGS.md).
+    # When the imaginary part is negligible, cast y back to real so that
+    # scalar * UniTensor preserves the input dtype (same guard as davidson).
+    if np.max(np.abs(y.imag)) < 1.e-14 * max(np.max(np.abs(y.real)), 1.):
+        y = y.real
+        coeff = lambda yi: float(yi)
+    else:
+        coeff = lambda yi: complex(yi)
+
     # x = x0 + V[:m] @ y    (UniTensor addition drops labels — restore)
     for i in range(m):
-        x = x + complex(y[i]) * V[i]
+        x = x + coeff(y[i]) * V[i]
         x.set_labels(_labels)
 
     # True residual (cheap: one extra apply).

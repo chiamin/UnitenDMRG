@@ -1,16 +1,13 @@
 """Unit tests for TDVPEngine and Lanczos Krylov time evolution.
 
+Standalone unit tests for `lanczos_expm_multiply` (dense and QN, real and
+complex) live in `tests/linalg/test_lanczos.py`.  This file covers the TDVP
+engine end-to-end, which exercises `lanczos_expm_multiply` through the real
+DMRG/MPS glue (including QN evolution in the TestTDVP*QN classes).
+
 Coverage
 --------
-1. lanczos_expm_multiply  (TestLanczoExpmMultiply)
-   - Real-time evolution preserves norm:  ||exp(-i*dt*H)|v>|| == ||v||
-   - Labels of output are identical to labels of input
-   - dt=0 is identity:  exp(0)|v> == |v>
-   - Short-time agreement with first-order Taylor:  exp(dt*H)|v> ≈ |v> + dt*H|v>
-   - Known matrix exponential: 1×1 matrix exp(a*dt) == scalar
-   - Backward sign: exp(+dt*H) with H negative definite → norm grows
-
-2. EffOperator 0-site regression  (TestEffOperator0Site)
+1. EffOperator 0-site regression  (TestEffOperator0Site)
    - Bug fix: output has labels ["l","r"] (not four labels)
    - apply(phi) has same shape as phi
    - Identity-like 0-site MPO: apply(phi) ≈ phi
@@ -79,7 +76,6 @@ if cytnx is not None:
     from tests.helpers.mps_test_cases import random_u1_sz_mps
     from MPS.physical_sites import spin_half
     from MPS.auto_mpo import AutoMPO
-    from linalg import lanczos_expm_multiply, inner
     from DMRG.effective_operators import EffOperator
     from DMRG.environment import OperatorEnv
     from TDVP.tdvp_engine import TDVPEngine
@@ -192,98 +188,6 @@ def _qn_heisenberg_mpo(N: int, dtype=float):
         ampo.add(J / 2, "Sp", i, "Sm", i + 1)
         ampo.add(J / 2, "Sm", i, "Sp", i + 1)
     return ampo.to_mpo()
-
-
-# ---------------------------------------------------------------------------
-# 1. lanczos_expm_multiply
-# ---------------------------------------------------------------------------
-
-@unittest.skipIf(cytnx is None, "cytnx not available")
-class TestLanczoExpmMultiply(unittest.TestCase):
-
-    def setUp(self):
-        n = 12
-        rng = np.random.default_rng(42)
-        A = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
-        self.H_np = (A + A.conj().T) / 2.0          # Hermitian
-        self.n    = n
-        v_np = rng.standard_normal(n) + 1j * rng.standard_normal(n)
-        self.v0   = _vec(v_np)
-        self.norm0 = float(np.linalg.norm(v_np))
-
-    def test_real_time_norm_preserved(self):
-        """||exp(-i*dt*H)|v>|| equals ||v|| for unitary evolution."""
-        dt    = -1j * 0.1                            # real-time step
-        apply = _matvec(self.H_np)
-        result = lanczos_expm_multiply(apply, self.v0, dt, k=self.n)
-        norm_out = result.Norm().item()
-        self.assertAlmostEqual(norm_out, self.norm0, places=6)
-
-    def test_labels_preserved(self):
-        """Output labels are identical to input labels."""
-        apply = _matvec(self.H_np)
-        result = lanczos_expm_multiply(apply, self.v0, -1j * 0.05, k=self.n)
-        self.assertEqual(list(result.labels()), ["x"])
-
-    def test_zero_dt_is_identity(self):
-        """exp(0 * H)|v> equals |v> to numerical precision."""
-        apply  = _matvec(self.H_np)
-        result = lanczos_expm_multiply(apply, self.v0, 0.0, k=self.n)
-        v_np   = self.v0.get_block().numpy().ravel()
-        r_np   = result.get_block().numpy().ravel()
-        np.testing.assert_allclose(r_np, v_np, atol=1e-10)
-
-    def test_short_time_taylor_agreement(self):
-        """exp(dt*H)|v> ≈ |v> + dt*H|v>  for small real dt."""
-        dt    = 1e-4                                 # small real step
-        apply = _matvec(self.H_np)
-        result = lanczos_expm_multiply(apply, self.v0, dt, k=self.n)
-
-        v_np   = self.v0.get_block().numpy().ravel()
-        Hv_np  = self.H_np @ v_np
-        taylor = v_np + dt * Hv_np
-
-        r_np = result.get_block().numpy().ravel()
-        np.testing.assert_allclose(r_np, taylor, atol=1e-7)
-
-    def test_known_1x1_matrix(self):
-        """For a 1×1 matrix [[a]], exp(dt * a) * v == e^(a*dt) * v."""
-        a  = 3.5 + 0.0j
-        dt = 0.2
-        H1 = np.array([[a]])
-        v1 = _vec(np.array([1.0 + 0.0j]))
-        apply = _matvec(H1)
-        result = lanczos_expm_multiply(apply, v1, dt, k=4)
-        r_np = result.get_block().numpy().ravel()
-        expected = np.exp(a * dt)
-        self.assertAlmostEqual(complex(r_np[0]), expected, places=10)
-
-    def test_backward_evolution_increases_norm(self):
-        """exp(+dt*H) with dt>0 and H positive-definite increases norm."""
-        # Build a positive-definite matrix:  H = A†A + I
-        rng = np.random.default_rng(7)
-        A   = rng.standard_normal((8, 8)) + 1j * rng.standard_normal((8, 8))
-        H_pd = A.conj().T @ A + np.eye(8)
-        v_np = rng.standard_normal(8) + 1j * rng.standard_normal(8)
-        v0   = _vec(v_np)
-        apply = _matvec(H_pd)
-        result = lanczos_expm_multiply(apply, v0, 0.1, k=8)
-        norm_out = result.Norm().item()
-        self.assertGreater(norm_out, v0.Norm().item())
-
-    def test_exact_eigh_agreement(self):
-        """Full Krylov (k=n) matches numpy eigh-based expm exactly (Hermitian H)."""
-        dt    = 0.3 + 0.1j
-        apply = _matvec(self.H_np)
-        result = lanczos_expm_multiply(apply, self.v0, dt, k=self.n)
-
-        # Reference: exp(dt*H) via eigendecomposition (same as our implementation)
-        v_np = self.v0.get_block().numpy().ravel()
-        evals, evecs = np.linalg.eigh(self.H_np)
-        exact = evecs @ (np.exp(dt * evals) * (evecs.T.conj() @ v_np))
-
-        r_np = result.get_block().numpy().ravel()
-        np.testing.assert_allclose(r_np, exact, atol=1e-8)
 
 
 # ---------------------------------------------------------------------------
